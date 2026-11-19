@@ -1,0 +1,42 @@
+
+[
+  {
+    "id": "EDR-001",
+    "product": "Microsoft Defender",
+    "description": "Endpoint offline for 48 hours. Agent not reporting to security console.",
+    "category": "agent_offline"
+  },
+  {
+    "id": "EDR-002",
+    "product": "CrowdStrike Falcon",
+    "description": "Falcon sensor installation failed on Windows 11 endpoint.",
+    "category": "installation_failure"
+  },
+  {
+    "id": "EDR-003",
+    "product": "Trellix ENS",
+    "description": "Antivirus definitions have not updated for 72 hours.",
+    "category": "outdated_definitions"
+  },
+
+
+{
+  "id": "EDR-004",
+  "product": "Microsoft Defender",
+  "description": "Endpoint has stopped communicating with the Defender security portal.",
+  "category": "agent_offline"
+},
+{
+  "id": "EDR-005",
+  "product": "CrowdStrike Falcon",
+  "description": "Falcon sensor deployment unsuccessful on several Windows endpoints.",
+  "category": "installation_failure"
+},
+{
+  "id": "EDR-006",
+  "product": "Trellix ENS",
+  "description": "Antivirus signatures are three days out of date.",
+  "category": "outdated_definitions"
+}
+
+]

@@ -1,0 +1,5 @@
+streamlit>=1.49,<2
+google-genai>=1.50,<4
+python-dotenv>=1,<2
+Pillow>=10,<14
+tldextract>=5.1,<6

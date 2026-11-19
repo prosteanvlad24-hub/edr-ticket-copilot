@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 740 380" fill="none">
+  <defs>
+    <linearGradient id="edge" x1="110" x2="740" y1="290" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#37cee8" stop-opacity="0"/>
+      <stop offset=".52" stop-color="#37cee8" stop-opacity=".25"/>
+      <stop offset="1" stop-color="#647bed" stop-opacity=".45"/>
+    </linearGradient>
+    <radialGradient id="fade" cx="87%" cy="20%" r="70%">
+      <stop stop-color="white"/>
+      <stop offset=".7" stop-color="white" stop-opacity=".45"/>
+      <stop offset="1" stop-color="white" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="nodes" width="10" height="10" patternUnits="userSpaceOnUse">
+      <circle cx="1" cy="1" r=".77" fill="#62aef0" opacity=".45"/>
+    </pattern>
+    <mask id="feather"><rect width="740" height="380" fill="url(#fade)"/></mask>
+  </defs>
+  <g mask="url(#feather)">
+    <path d="M94 301C254 298 312 122 460 153C581 178 615 211 740 79V0H94Z" fill="url(#nodes)" opacity=".55"/>
+    <g stroke="url(#edge)" stroke-width="1.15">
+      <path d="M68 328C231 326 303 164 454 185C583 204 642 202 740 96"/>
+      <path d="M78 307C244 301 301 144 459 161C585 184 636 177 740 71"/>
+      <path d="M98 284C265 277 315 122 463 137C598 156 638 150 740 49"/>
+      <path d="M148 262C290 238 328 105 470 112C594 131 650 117 740 27"/>
+    </g>
+    <g stroke="#55a8de" stroke-width="1" opacity=".28">
+      <path d="M286 0v39l48 48h35M429 0v27l28 28h66l32 31h82M567 0v31l27 27h121"/>
+      <path d="M740 199h-56l-30 30H530l-38 38h-63M740 219h-45l-34 35h-93"/>
+      <circle cx="372" cy="87" r="3"/><circle cx="640" cy="86" r="3"/><circle cx="425" cy="267" r="3"/>
+    </g>
+  </g>
+</svg>

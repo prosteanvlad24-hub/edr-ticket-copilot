@@ -1,0 +1,44 @@
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python cache and build files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# IDE and operating system
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local execution outputs
+runs/
+*.log
+
+# Streamlit local secrets
+.streamlit/secrets.toml
+
+# Legacy UI prototypes
+dashboard_backup.py
+dashboard_v1.py
+dashboard_v1_1.py
+
+# Local sample output
+EDR_Incident_Report_Test.md
+sample_report.html
+
+ui_styles_before_header_fix.py
