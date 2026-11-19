@@ -28,6 +28,12 @@ Thumbs.db
 # Local execution outputs
 runs/
 *.log
+.case-data/
+*.sqlite*
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
 
 # Streamlit local secrets
 .streamlit/secrets.toml
