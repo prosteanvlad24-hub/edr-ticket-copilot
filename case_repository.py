@@ -373,7 +373,7 @@ class CaseRepository:
                 return current
             return self._advance(db, previous, investigation, status, verdict, "save")
 
-    def transition(self, case_id, expected_version, status, *, rationale=None):
+    def transition(self, case_id, expected_version, status, *, rationale=None, investigation=None):
         target = CaseStatus(status)
         rationale = rationale.strip() if rationale is not None else None
         with self._transaction(write=True) as db:
@@ -386,10 +386,12 @@ class CaseRepository:
                 allowed = _TRANSITIONS[current]
             if target not in allowed:
                 raise InvalidTransitionError(f"Cannot transition from {current} to {target}")
+            if investigation is not None and (current, target) != (CaseStatus.DRAFT, CaseStatus.IN_PROGRESS):
+                raise InvalidTransitionError("Investigation edits can accompany draft submission only")
             reopening = current in (CaseStatus.CLOSED_RESOLVED, CaseStatus.CLOSED_INCONCLUSIVE) and target == CaseStatus.IN_PROGRESS
             if current != CaseStatus.ARCHIVED and (target in _REQUIRES_REASON or reopening) and not rationale:
                 raise InvalidTransitionError("An analyst rationale is required for this transition")
             return self._advance(
-                db, previous, self._load(db, previous).investigation,
+                db, previous, investigation if investigation is not None else self._load(db, previous).investigation,
                 target, IncidentVerdict(previous["incident_verdict"]), "transition", rationale,
             )

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import streamlit as st
 
+from case_management_ui import MANAGEMENT, CaseWorkspace, navigation_view, wizard_key
 from evidence_inputs import MAX_IMAGE_BYTES, MAX_IMAGES, prepare_images
 from investigation_state import LAB, MANUAL, Evidence, Investigation, Ticket
 from ioc_engine import extract_iocs
@@ -13,7 +14,7 @@ from report_engine_v2 import generate_investigation_report
 from rules_engine import classify_ticket, get_troubleshooting_steps, ransomware_signals, reported_ticket_text
 from severity_engine import assess_severity, source_reported_severity
 from ticket_lab_inputs import list_evidence, list_runs, read_case, read_catalog
-from ui_styles import FAVICON, apply_styles, render_metrics, render_progress, render_sidebar, render_stage_heading
+from ui_styles import FAVICON, apply_styles, render_metrics, render_progress, render_sidebar_brand, render_stage_heading
 
 ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / "runs"
@@ -35,24 +36,28 @@ MODULES = {
 SEVERITY_TONE = {"critical": "danger", "high": "danger", "medium": "warning", "low": "success"}
 
 
-def show_sidebar(case):
-    if not os.getenv("GEMINI_API_KEY"):
-        try:
-            from dotenv import load_dotenv
-
-            load_dotenv(ROOT / ".env")
-        except (ImportError, OSError):
-            pass
-    with st.sidebar:
-        ticket = case.ticket
-        title = next(
-            (line.strip() for line in ticket.description.splitlines() if line.strip() and line.strip() != ticket.lab_id),
-            "",
-        )
-        render_sidebar(
-            st, ticket.lab_id or "Manual ticket", title[:160], ticket.criticality,
-            bool(os.getenv("GEMINI_API_KEY")),
-        )
+def show_sidebar_status(case, workspace):
+    current = workspace.active
+    ticket = case.ticket
+    save_label, save_color = workspace.save_status(case)
+    db_label, db_color = workspace.database_status
+    gemini_ready = bool(os.getenv("GEMINI_API_KEY"))
+    with st.container(key="edr_active_case", border=True, gap="xsmall"):
+        st.markdown("#### Active Case")
+        if current:
+            st.text(current.title)
+        st.caption(f"Incident ID · {ticket.lab_id}" if ticket.lab_id else "Manual ticket")
+        with st.container(horizontal=True, gap="xsmall"):
+            if current:
+                st.badge(current.status.value.replace("_", " ").title(), color="blue")
+            st.badge(save_label, color=save_color)
+        st.caption(f"{ticket.criticality.title()} asset criticality")
+    with st.container(key="edr_system_status", border=True, gap="xsmall"):
+        st.markdown("#### System Status")
+        st.badge("Local Analysis · Available", color="green")
+        st.badge("Gemini · Configured" if gemini_ready else "Gemini · API key required",
+                 color="green" if gemini_ready else "gray")
+        st.badge(f"Case database · {db_label}", color=db_color)
 
 
 def show_sample_library():
@@ -81,19 +86,19 @@ def show_manual_entry(case):
         "affected_endpoints": draft.affected_endpoints,
     }
     for key, value in fields.items():
-        st.session_state.setdefault(key, value)
+        st.session_state.setdefault(wizard_key(key), value)
     with st.container(border=True, key="ticket-editor"):
         st.subheader("Incident description")
         description = st.text_area(
-            "Incident description", value=None, key="ticket_description", height=200,
+            "Incident description", value=None, key=wizard_key("ticket_description"), height=200,
             label_visibility="collapsed",
             placeholder="Paste an EDR alert, incident note, or support ticket.",
         ) or ""
         st.markdown("**Incident context**")
         left, center, right = st.columns(3)
-        criticality = left.selectbox("Asset criticality", ["low", "medium", "high", "critical"], index=None, key="asset_criticality")
-        hours = center.number_input("Hours since agent communication", min_value=0, value=None, key="offline_hours")
-        endpoints = right.number_input("Affected endpoints", min_value=1, value=None, key="affected_endpoints")
+        criticality = left.selectbox("Asset criticality", ["low", "medium", "high", "critical"], index=None, key=wizard_key("asset_criticality"))
+        hours = center.number_input("Hours since agent communication", min_value=0, value=None, key=wizard_key("offline_hours"))
+        endpoints = right.number_input("Affected endpoints", min_value=1, value=None, key=wizard_key("affected_endpoints"))
     case.manual_draft = Ticket(
         description.strip(), criticality or draft.criticality,
         draft.offline_hours if hours is None else hours,
@@ -103,19 +108,20 @@ def show_manual_entry(case):
     return bool(case.manual_draft.description)
 
 
-def show_lab_entry(case):
+def show_lab_entry(case, workspace):
+    run_key = wizard_key("lab_run")
     with st.container(border=True):
         st.subheader("Generate synthetic tickets")
         left, right = st.columns(2)
-        seed = left.number_input("Generator seed", value=42, step=1, key="lab_seed")
-        count = right.number_input("Tickets to generate", min_value=1, max_value=10, value=3, key="lab_count")
+        seed = left.number_input("Generator seed", value=42, step=1, key=wizard_key("lab_seed"))
+        count = right.number_input("Tickets to generate", min_value=1, max_value=10, value=3, key=wizard_key("lab_count"))
         if st.button("Generate synthetic tickets", key="lab_generate"):
             try:
                 from ticket_lab import generate_run
 
                 with st.spinner("Creating synthetic tickets and screenshots..."):
                     run = generate_run(RUNS, count=int(count), seed=int(seed), with_evidence=True)
-                st.session_state["lab_run"] = run.name
+                st.session_state[run_key] = run.name
             except (ImportError, OSError, TypeError, ValueError) as exc:
                 st.error(f"Ticket generation failed. {exc}")
 
@@ -125,9 +131,9 @@ def show_lab_entry(case):
         return bool(case.ticket.lab_id)
     with st.container(border=True):
         st.subheader("Load a synthetic ticket")
-        if st.session_state.get("lab_run") not in runs:
-            st.session_state["lab_run"] = case.ticket.lab_run if case.ticket.lab_run in runs else next(iter(runs))
-        run = runs[st.selectbox("Synthetic run", list(runs), index=None, key="lab_run")]
+        if st.session_state.get(run_key) not in runs:
+            st.session_state[run_key] = case.ticket.lab_run if case.ticket.lab_run in runs else next(iter(runs))
+        run = runs[st.selectbox("Synthetic run", list(runs), index=None, key=run_key)]
         try:
             catalog = read_catalog(run)
             if not catalog:
@@ -136,7 +142,7 @@ def show_lab_entry(case):
             ids = list(catalog)
             default = ids.index(case.ticket.lab_id) if case.ticket.lab_run == run.name and case.ticket.lab_id in ids else 0
             selected = st.selectbox(
-                "Synthetic ticket", ids, index=default, key="lab_ticket_" + run.name,
+                "Synthetic ticket", ids, index=default, key=wizard_key("lab_ticket_" + run.name),
                 format_func=lambda ticket_id: f"{ticket_id} · {catalog[ticket_id]}",
             )
             if st.button("Load into Guided Investigation", key="lab_load"):
@@ -145,7 +151,8 @@ def show_lab_entry(case):
                     loaded.description, loaded.asset_criticality, loaded.offline_hours,
                     loaded.affected_endpoints, loaded.run, loaded.ticket_id,
                 ))
-                st.rerun()
+                if workspace.checkpoint(case):
+                    st.rerun()
             if case.ticket.lab_run == run.name and case.ticket.lab_id == selected:
                 st.success(f"{selected} loaded")
                 st.text_area("Loaded incident description", value=case.ticket.description, disabled=True, height=180)
@@ -156,10 +163,10 @@ def show_lab_entry(case):
     return False
 
 
-def show_ticket_entry(case):
-    mode = st.radio("Ticket source", ["Manual entry", LAB], index=int(case.entry_source == LAB), horizontal=True, key="ticket_source_widget")
+def show_ticket_entry(case, workspace):
+    mode = st.radio("Ticket source", ["Manual entry", LAB], index=int(case.entry_source == LAB), horizontal=True, key=wizard_key("ticket_source_widget"))
     case.entry_source = mode
-    return show_lab_entry(case) if mode == LAB else show_manual_entry(case)
+    return show_lab_entry(case, workspace) if mode == LAB else show_manual_entry(case)
 
 
 def show_context(ticket):
@@ -364,12 +371,22 @@ def load_lab_evidence(case):
     run = RUNS / case.ticket.lab_run
     try:
         options = list_evidence(run, case.ticket.lab_id)
+    except (ImportError, OSError, ValueError) as exc:
+        if case.evidence.images:
+            st.caption("Showing saved screenshots. The original Ticket Lab files are unavailable.")
+        else:
+            case.set_evidence(LAB, Evidence(), str(exc))
+        return
+    try:
+        if case.evidence.images and not set(case.lab_selection or ()).issubset(options):
+            st.caption("Showing saved screenshots. The original Ticket Lab files are unavailable.")
+            return
         if not options:
             st.caption("This synthetic run contains no screenshots for the selected ticket.")
         default = options[:1] if case.lab_selection is None else [name for name in case.lab_selection if name in options]
         selected = tuple(st.multiselect(
             "Synthetic screenshots", options, default=default, max_selections=MAX_IMAGES,
-            key=f"wizard_lab_images_{case.revision}",
+            key=wizard_key(f"wizard_lab_images_{case.revision}"),
             format_func=lambda name: f"Screenshot {options.index(name) + 1}",
         ))
         if selected != case.lab_selection or LAB in case.evidence_errors:
@@ -441,11 +458,22 @@ def show_evidence_assessment(result, provenance):
                 st.write(result["clarification_message"])
 
 
-def show_evidence_investigation(case):
+def show_screenshots(case):
+    if case.evidence_source in case.evidence_errors:
+        st.warning(case.evidence_errors[case.evidence_source])
+    if case.evidence.images:
+        st.markdown("**Review selected screenshots**")
+        for screenshot, (_, data) in zip(case.evidence_provenance, case.evidence.images):
+            st.caption(f"{screenshot['id']} · {screenshot['source']}")
+            st.text(screenshot["filename"] or screenshot["label"])
+            st.image(data, width=670)
+
+
+def show_evidence_investigation(case, workspace):
     if case.ticket.lab_id:
         source = st.radio(
             "Evidence source", [LAB, MANUAL], index=int(case.evidence_source == MANUAL),
-            horizontal=True, key=f"wizard_evidence_source_{case.revision}",
+            horizontal=True, key=wizard_key(f"wizard_evidence_source_{case.revision}"),
         )
         case.set_evidence_source(source)
 
@@ -455,7 +483,7 @@ def show_evidence_investigation(case):
         if case.evidence_source == LAB:
             load_lab_evidence(case)
         else:
-            key = f"guided_evidence_upload_{case.revision}_{case.upload_revision}"
+            key = wizard_key(f"guided_evidence_upload_{case.revision}_{case.upload_revision}")
             st.file_uploader(
                 "Evidence screenshots", type=["png", "jpg", "jpeg", "webp"],
                 accept_multiple_files=True, key=key, on_change=capture_uploads, args=(case, key),
@@ -463,21 +491,15 @@ def show_evidence_investigation(case):
             if case.evidence.images or MANUAL in case.evidence_errors:
                 if st.button("Clear uploaded screenshots", key="wizard_clear_uploads"):
                     case.clear_manual_evidence()
-                    st.rerun()
-        if case.evidence_source in case.evidence_errors:
-            st.warning(case.evidence_errors[case.evidence_source])
-        if case.evidence.images:
-            st.markdown("**Review selected screenshots**")
-            for screenshot, (_, data) in zip(case.evidence_provenance, case.evidence.images):
-                st.caption(f"{screenshot['id']} · {screenshot['source']}")
-                st.text(screenshot["filename"] or screenshot["label"])
-                st.image(data, width=670)
+                    if workspace.checkpoint(case):
+                        st.rerun()
+        show_screenshots(case)
 
     fingerprint = case.fingerprint
     consent = st.checkbox(
         "I have reviewed the screenshots and authorize sending them, the ticket, and any prior validation to Gemini.",
         value=bool(fingerprint and case.consent == fingerprint), disabled=not fingerprint,
-        key=f"guided_consent_{case.revision}_{case.evidence_revision}",
+        key=wizard_key(f"guided_consent_{case.revision}_{case.evidence_revision}"),
     )
     case.consent = fingerprint if consent else None
     if st.button("Analyze Evidence & Reassess", type="primary", key="guided_analyze_evidence", disabled=not case.consent):
@@ -567,24 +589,25 @@ def show_final_report(case):
             st.markdown(markdown)
 
 
-def navigate(case, entry_ready):
+def navigate(case, entry_ready, workspace):
     with st.container(key="wizard-navigation"):
         back, skip, next_step = st.columns(3)
-        if back.button("Back", key="wizard_back", disabled=case.step == 0, use_container_width=True):
+        if back.button("Back", key="wizard_back", disabled=case.step == 0, width="stretch"):
             case.step -= 1
-            st.rerun()
+            return True
         if case.step == 3 and not case.evidence_assessment:
-            if skip.button("Skip evidence", key="wizard_skip_evidence", use_container_width=True):
+            if skip.button("Skip evidence", key="wizard_skip_evidence", width="stretch"):
                 case.step = 4
-                st.rerun()
+                return True
         if case.step < len(STEPS) - 1 and next_step.button(
             "Next", key="wizard_next", type="secondary" if case.step == 3 and not case.evidence_assessment else "primary",
-            disabled=case.step == 0 and not entry_ready, use_container_width=True,
+            disabled=case.step == 0 and not entry_ready, width="stretch",
         ):
-            if case.step == 0 and case.entry_source == "Manual entry":
+            if workspace.editable and case.step == 0 and case.entry_source == "Manual entry":
                 case.commit_ticket(case.manual_draft)
             case.step += 1
-            st.rerun()
+            return True
+    return False
 
 
 def main():
@@ -593,22 +616,69 @@ def main():
         layout="wide", initial_sidebar_state="auto",
     )
     apply_styles(st)
+    if not os.getenv("GEMINI_API_KEY"):
+        try:
+            from dotenv import load_dotenv
+
+            load_dotenv(ROOT / ".env")
+        except (ImportError, OSError):
+            pass
     if "investigation" not in st.session_state:
         st.session_state["investigation"] = Investigation()
     case = st.session_state["investigation"]
-    show_sidebar(case)
+    workspace = CaseWorkspace()
+    with st.sidebar:
+        render_sidebar_brand(st)
+        view = navigation_view()
+        sidebar_status = st.container()
+    if view == MANAGEMENT:
+        workspace.render_management(case)
+    else:
+        render_wizard(case, workspace)
+    with sidebar_status:
+        show_sidebar_status(case, workspace)
+
+
+def render_wizard(case, workspace):
+    controls = st.container()
     render_progress(st, PROGRESS, case.step)
     render_stage_heading(
         st, case.ticket.lab_id, STEPS[case.step], STEP_DESCRIPTIONS[case.step], case.step + 1, len(STEPS),
     )
 
+    entry_ready = True
+    if workspace.active and not workspace.editable:
+        st.caption("Read-only case view")
     if case.step == 0:
-        entry_ready = show_ticket_entry(case)
+        if workspace.editable:
+            entry_ready = show_ticket_entry(case, workspace)
+        else:
+            ticket = case.manual_draft if workspace.conflicted and case.entry_source == "Manual entry" else case.ticket
+            st.text(ticket.description)
+            show_context(case.ticket)
+    elif case.step == 1:
+        if workspace.editable:
+            show_initial_analysis(case)
+        else:
+            show_module_status(case)
+    elif case.step == 2:
+        show_initial_findings(case)
+    elif case.step == 3:
+        if workspace.editable:
+            show_evidence_investigation(case, workspace)
+        else:
+            show_screenshots(case)
+            if case.evidence_assessment:
+                show_evidence_assessment(case.evidence_assessment, case.evidence_provenance)
     else:
-        views = (show_initial_analysis, show_initial_findings, show_evidence_investigation, show_final_report)
-        views[case.step - 1](case)
-        entry_ready = True
-    navigate(case, entry_ready)
+        show_final_report(case)
+    previous_step = case.step
+    moved = navigate(case, entry_ready, workspace)
+    saved = not workspace.editable or workspace.checkpoint(case, submit=moved and previous_step == 0)
+    if moved and saved:
+        st.rerun()
+    with controls:
+        workspace.render_wizard_header(case)
 
 
 main()

@@ -165,53 +165,26 @@ INTERFACE_CSS = r"""
     line-height: 1.16; letter-spacing: -.022em;
 }
 .edr-brand-caption { margin-top: .38rem; color: var(--edr-muted); font-size: var(--edr-meta); }
-.edr-sidebar-workspace {
-    display: flex; align-items: center; gap: .65rem; padding: .77rem .84rem;
-    color: var(--edr-text); font-weight: var(--edr-strong); font-size: 14px;
-    background: linear-gradient(120deg, #123655, #112844);
-    border: 1px solid #3f7299; border-radius: var(--edr-radius);
+.st-key-edr_operations button {
+    min-height: 2.75rem;
+    justify-content: flex-start;
+    text-align: left;
+    font-weight: var(--edr-strong);
 }
-.edr-sidebar-workspace .edr-icon { color: var(--edr-accent); }
-.edr-sidebar-section { margin-top: 1.45rem; }
-.edr-sidebar-heading {
-    color: var(--edr-muted); font-size: .91rem; font-weight: var(--edr-strong);
-    margin: 0 0 .54rem; padding-left: .08rem;
+.st-key-edr_operations button:focus-visible {
+    outline: 2px solid var(--edr-accent);
+    outline-offset: 2px;
 }
-.edr-incident {
-    padding: .83rem .86rem; border: 1px solid #304e70; border-radius: var(--edr-radius);
-    background: linear-gradient(145deg, #172c47, #0f2039);
-    box-shadow: 0 8px 20px #040b1a22;
-}
-.edr-incident-title {
-    color: var(--edr-text); font-size: 1.03rem; font-weight: var(--edr-strong);
-    display: flex; gap: .5rem; align-items: center;
-}
-.edr-incident-title .edr-icon { color: var(--edr-accent); width: 1.1rem; height: 1.1rem; }
-.edr-incident-description {
-    color: var(--edr-muted); margin-top: .48rem; font-size: .89rem; line-height: 1.42;
-    overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
-    overflow: hidden;
+.st-key-edr_active_case, .st-key-edr_system_status {
+    background-color: #10223a;
+    border-color: var(--edr-border);
+    border-radius: var(--edr-radius);
 }
 .edr-pill {
     display: inline-flex; align-items: center; gap: .28rem;
     border: 1px solid #49729a; border-radius: 999px; padding: .16rem .52rem;
     background: #122d49; color: #d6edfc; font-size: .8rem;
     font-weight: var(--edr-medium); line-height: 1.32; overflow-wrap: anywhere;
-}
-.edr-incident .edr-pill { margin-top: .64rem; }
-.edr-engine {
-    display: flex; justify-content: space-between; align-items: center; gap: .4rem;
-    padding: .58rem .65rem; margin-bottom: .42rem; color: var(--edr-text);
-    background: #122239c4; border: 1px solid #2a4462; border-radius: .57rem;
-    font-size: .88rem;
-}
-.edr-engine-name { display: inline-flex; align-items: center; gap: .42rem; }
-.edr-engine-name .edr-icon { width: .96rem; height: .96rem; color: var(--edr-accent); }
-.edr-engine-status { display: inline-flex; align-items: center; gap: .3rem; color: var(--edr-muted); font-size: .81rem; }
-.edr-engine-status[data-ready="true"] { color: var(--edr-success); }
-.edr-engine-status::before {
-    content: ""; width: .38rem; height: .38rem; flex: none;
-    border-radius: 50%; background: currentColor;
 }
 
 .edr-case-meta {
@@ -398,32 +371,12 @@ def apply_styles(st) -> None:
     st.markdown("<style>" + tokens + INTERFACE_CSS + "</style>", unsafe_allow_html=True)
 
 
-def render_sidebar(st, incident, description, criticality, gemini_ready):
+def render_sidebar_brand(st):
     src = _brand_source()
     emblem = f'<img src="{src}" alt="EDR Ticket Copilot chess knight emblem" width="192" height="192">' if src else ""
-    details = f'<div class="edr-incident-description">{escape(description)}</div>' if description else ""
-    badge = f'<span class="edr-pill">{escape(criticality.title())} criticality</span>'
-    mono = " edr-case-id" if incident != "Manual ticket" else ""
-    engines = []
-    for name, glyph, ready, status in (
-        ("Local analysis", "server", True, "Available"),
-        ("Gemini", "spark", gemini_ready, "Configured" if gemini_ready else "API key required"),
-    ):
-        engines.append(
-            f'<div class="edr-engine"><span class="edr-engine-name">{icon(glyph)}{name}</span>'
-            f'<span class="edr-engine-status" data-ready="{str(ready).lower()}">{status}</span></div>'
-        )
     st.markdown(
         f'<div class="edr-brand">{emblem}<div><div class="edr-brand-name">EDR Ticket<br>Copilot</div>'
-        '<div class="edr-brand-caption">Endpoint investigation</div></div></div>'
-        f'<div class="edr-sidebar-workspace">{icon("layers")}Investigation wizard</div>'
-        '<section class="edr-sidebar-section" aria-label="Active incident">'
-        '<div class="edr-sidebar-heading">Active incident</div>'
-        f'<div class="edr-incident"><div class="edr-incident-title{mono}">{icon("file")}{escape(incident)}</div>'
-        f'{details}{badge}</div></section>'
-        '<section class="edr-sidebar-section" aria-label="Analysis engines">'
-        '<div class="edr-sidebar-heading">Analysis engines</div>'
-        + "".join(engines) + "</section>",
+        '<div class="edr-brand-caption">Endpoint investigation workspace</div></div></div>',
         unsafe_allow_html=True,
     )
 
