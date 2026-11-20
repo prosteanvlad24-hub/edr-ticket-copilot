@@ -32,7 +32,7 @@ _ACTIONS = {
 
 def navigation_view():
     view = st.session_state.setdefault(_VIEW_KEY, WIZARD)
-    with st.container(key="edr_operations", gap="xsmall"):
+    with st.container(key="edr_operations"):
         st.markdown("#### Operations")
         for label, key, icon in (
             (WIZARD, "nav_wizard", ":material/troubleshoot:"),

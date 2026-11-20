@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -113,6 +114,19 @@ class TicketLabIntegrationTest(unittest.TestCase):
 
     def test_native_theme_matches_design_tokens(self):
         self.assertEqual(theme_config(), (PROJECT / ".streamlit" / "config.toml").read_text(encoding="utf-8"))
+
+    def test_default_and_documented_launch_bind_to_loopback(self):
+        config = tomllib.loads((PROJECT / ".streamlit" / "config.toml").read_text(encoding="utf-8"))
+        self.assertEqual("127.0.0.1", config["server"]["address"])
+        self.assertTrue(config["server"]["enableStaticServing"])
+        for name in ("README.md", "WIZARD.md"):
+            with self.subTest(document=name):
+                launch_lines = [
+                    line for line in (PROJECT / name).read_text(encoding="utf-8").splitlines()
+                    if "streamlit run dashboard_v1_2.py" in line
+                ]
+                self.assertTrue(launch_lines)
+                self.assertTrue(all("--server.address=127.0.0.1" in line.split() for line in launch_lines))
 
     def create_app(self):
         for name in ("dashboard_v1_2.py", "tickets.json"):

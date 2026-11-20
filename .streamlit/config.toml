@@ -1,5 +1,6 @@
 # Generated from ui_styles.py. Run python ui_styles.py to refresh.
 [server]
+address = "127.0.0.1"
 enableStaticServing = true
 
 [theme]

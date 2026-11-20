@@ -1,10 +1,10 @@
 # EDR Ticket Copilot investigation wizard
 
-Run from the project directory so Streamlit loads the bundled theme.
+Run from the project directory so Streamlit loads the bundled theme. The wizard requires Streamlit 1.67.0 or later in the 1.x series.
 
 ```bash
 python -m pip install -r requirements.txt
-python -m streamlit run dashboard_v1_2.py
+python -m streamlit run dashboard_v1_2.py --server.address=127.0.0.1
 ```
 
 Set `GEMINI_API_KEY` in the environment or a local `.env` to enable remote analysis. Local triage, IOC extraction, Ticket Lab generation and report exports work independently. Run validation and general Gemini analysis from step 2. Step 4 requires a separate confirmation after reviewing the exact screenshots. **Skip evidence** produces a preliminary report.

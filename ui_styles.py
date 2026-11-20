@@ -69,7 +69,7 @@ def theme_config() -> str:
 
     lines = [
         "# Generated from ui_styles.py. Run python ui_styles.py to refresh.",
-        "[server]", "enableStaticServing = true", "", "[theme]", *entries(options),
+        "[server]", 'address = "127.0.0.1"', "enableStaticServing = true", "", "[theme]", *entries(options),
         "", "[theme.sidebar]", *entries({
             "backgroundColor": COLORS["sidebar"], "secondaryBackgroundColor": COLORS["raised"],
         }),

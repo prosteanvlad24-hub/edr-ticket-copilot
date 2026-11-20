@@ -59,7 +59,7 @@ sources, with recommendations for further investigation.
 ## Technology Stack
 
 - Python 3.11
-- Streamlit
+- Streamlit 1.67.0 or later in the 1.x series
 - Google Gemini API (`google-genai`)
 - Pillow
 - python-dotenv
@@ -108,10 +108,10 @@ Never commit API keys or credentials to version control.
 ### Run the Application
 
 ```bash
-streamlit run dashboard_v1_2.py
+streamlit run dashboard_v1_2.py --server.address=127.0.0.1
 ```
 
-Open the local address displayed by Streamlit, typically `http://localhost:8501`.
+Open `http://127.0.0.1:8501` on the machine running the app. Launch from the repository root so Streamlit loads the bundled configuration. EDR Ticket Copilot is intended for local, single-analyst use.
 
 ## Investigation Workflow
 

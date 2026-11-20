@@ -42,17 +42,17 @@ def show_sidebar_status(case, workspace):
     save_label, save_color = workspace.save_status(case)
     db_label, db_color = workspace.database_status
     gemini_ready = bool(os.getenv("GEMINI_API_KEY"))
-    with st.container(key="edr_active_case", border=True, gap="xsmall"):
+    with st.container(key="edr_active_case", border=True):
         st.markdown("#### Active Case")
         if current:
             st.text(current.title)
         st.caption(f"Incident ID · {ticket.lab_id}" if ticket.lab_id else "Manual ticket")
-        with st.container(horizontal=True, gap="xsmall"):
+        with st.container(horizontal=True):
             if current:
                 st.badge(current.status.value.replace("_", " ").title(), color="blue")
             st.badge(save_label, color=save_color)
         st.caption(f"{ticket.criticality.title()} asset criticality")
-    with st.container(key="edr_system_status", border=True, gap="xsmall"):
+    with st.container(key="edr_system_status", border=True):
         st.markdown("#### System Status")
         st.badge("Local Analysis · Available", color="green")
         st.badge("Gemini · Configured" if gemini_ready else "Gemini · API key required",

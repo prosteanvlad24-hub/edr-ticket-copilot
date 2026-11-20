@@ -58,6 +58,19 @@ class CaseManagementUITest(unittest.TestCase):
             app.sidebar.button(key=key).click()
             self.run_app(app)
 
+    def test_compatible_sidebar_renders_on_startup_and_for_saved_case(self):
+        app = self.start()
+        self.assertEqual("primary", app.sidebar.button(key="nav_wizard").proto.type)
+        badges = [item.value for item in app.sidebar.markdown]
+        self.assertIn(":gray-badge[Unsaved session]", badges)
+        self.assertIn(":green-badge[Case database · Available]", badges)
+        case = self.repository.create("Compatibility check")
+        self.open_case(app, case.metadata.case_id)
+        badges = [item.value for item in app.sidebar.markdown]
+        self.assertIn(":blue-badge[Draft]", badges)
+        self.assertIn(":green-badge[Saved]", badges)
+        self.assertEqual(case.metadata, self.repository.load(case.metadata.case_id).metadata)
+
     def test_new_save_and_open_restores_wizard_progress_without_rerun_versions(self):
         app = self.start()
         self.assertEqual(WIZARD, app.session_state["case_workspace_view"])
