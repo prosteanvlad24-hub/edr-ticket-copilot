@@ -2,6 +2,7 @@
 from datetime import datetime, timezone
 from typing import Any
 
+from case_repository import AI_MODULES
 from investigation_state import LAB
 from presentation_safety import (
     AI_EVIDENCE_STATUS_LABEL, AI_UNVERIFIED_NOTICE, SCREENSHOT_ATTRIBUTION_NOTICE,
@@ -16,10 +17,12 @@ def build_report_exports(case, *, audit=None):
     triage = case.results.get("triage")
     validation = case.prior_validation
     analysis = case.results.get("ai")
+    displayed = audit["displayed_ai_assessments"] if audit is not None else {}
     markdown = generate_investigation_report(
         description=case.ticket.description, rule_result=triage, ioc_result=case.results.get("iocs"),
         ai_analysis=analysis, validation=validation, evidence_assessment=evidence,
         synthetic_evidence=bool(evidence and case.evidence_source == LAB), evidence_provenance=provenance,
+        assessment_links=displayed,
     )
     payload = {
         "report_status": "ai_evidence_assessment_unverified" if evidence else "preliminary",
@@ -36,17 +39,29 @@ def build_report_exports(case, *, audit=None):
     }
     if audit is not None:
         payload["case_audit"] = audit
-        quality = audit["ai_assessment_quality"]
+        historical = [row for row in audit["ai_assessment_quality"] if row["scope"] == "historical"]
         markdown += (
             "\n## Case audit metadata\n\n"
             f"- Case ID: {_s(audit['case_id'])}\n- Case version: {_s(audit['version'])}\n"
             f"- Issued (UTC): {_s(audit['issued_at'])}\n- Lifecycle status: {_s(audit['lifecycle_status'])}\n"
             f"- Recorded incident verdict: {_s(audit['incident_verdict'])}\n"
-            "\n### Recorded AI assessment quality\n\n"
-            + _bullet([f"{row['assessment_id']} (version {row['assessment_version']}): {row['quality']}" for row in quality],
-                      "No saved AI assessment quality records.")
+            "\n### Historical AI assessment quality\n\n"
+            + _bullet([f"{AI_MODULES.get(row['module'], row['module'])} · {_assessment_summary(row)}" for row in historical],
+                      "No historical AI assessment quality records.")
         )
     return markdown, payload
+
+
+def _assessment_summary(row):
+    if row["assessment_id"] is None:
+        return f"Unregistered legacy assessment · {row['quality']}"
+    reviewed = f" · Review version {row['review_version']}" if row["review_version"] is not None else ""
+    return f"Assessment {row['assessment_id']} · Response version {row['assessment_version']} · {row['quality']}{reviewed}"
+
+
+def _assessment_line(links, module):
+    row = links.get(module) if links else None
+    return [f"- Recorded assessment quality: {_s(_assessment_summary(row))}"] if row else []
 
 
 def _bullet(items: Any, empty: str = "Not available") -> str:
@@ -65,6 +80,7 @@ def generate_investigation_report(
     *,
     synthetic_evidence: bool = False,
     evidence_provenance: list[dict] | tuple[dict, ...] = (),
+    assessment_links: dict | None = None,
 ) -> str:
     """Build a consolidated report from already completed analyses only."""
     status = AI_EVIDENCE_STATUS_LABEL if evidence_assessment else "Preliminary"
@@ -109,10 +125,12 @@ def generate_investigation_report(
     else:
         out += ["\n## 3. Extracted Indicators\n", "Not run for this ticket."]
     out += ["\n## 4. Gemini Incident Analysis\n"]
-    out += [AI_UNVERIFIED_NOTICE, markdown_literal_block(ai_analysis)] if ai_analysis else ["Not run for this ticket."]
+    out += [AI_UNVERIFIED_NOTICE, *_assessment_line(assessment_links, "ai"),
+            markdown_literal_block(ai_analysis)] if ai_analysis else ["Not run for this ticket."]
     if validation:
         out += ["\n## 5. Ticket Intent Validation\n",
                 AI_UNVERIFIED_NOTICE,
+                *_assessment_line(assessment_links, "validation"),
                 f"- Product: {_s(validation.get('product'))}",
                 f"- Request quality: **{_s(validation.get('assessment'))}**",
                 f"- Reported issue: {_s(validation.get('reported_issue'))}",
@@ -132,6 +150,7 @@ def generate_investigation_report(
         source = "Synthetic Ticket Lab screenshots" if synthetic_evidence else "Analyst-uploaded screenshots"
         out += ["\n## 6. Screenshot Evidence Reassessment\n",
                 AI_UNVERIFIED_NOTICE,
+                *_assessment_line(assessment_links, "evidence"),
                 SCREENSHOT_ATTRIBUTION_NOTICE,
                 f"**Evidence provenance:** {source}; no live console access. Image content and vendor UI labels may be synthetic or inaccurate.",
                 f"- AI conclusion status (unverified): {_s(e.get('conclusion_status'))}",

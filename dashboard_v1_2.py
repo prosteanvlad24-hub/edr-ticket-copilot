@@ -501,6 +501,10 @@ def load_lab_evidence(case, warning_key):
 
 def capture_uploads(case, key):
     files = st.session_state.get(key) or []
+    warning_key = f"{key}_warning"
+    st.session_state.pop(warning_key, None)
+    if not files:
+        return
     try:
         if len(files) > MAX_IMAGES:
             raise ValueError(f"Select no more than {MAX_IMAGES} screenshots.")
@@ -509,10 +513,10 @@ def capture_uploads(case, key):
         images = prepare_images([(item.name, item.getvalue()) for item in files])
         names = tuple(item.name.replace("\\", "/").rsplit("/", 1)[-1] for item in files)
         case.set_evidence(MANUAL, Evidence(names, tuple(images), names))
-    except (ImportError, ValueError) as exc:
-        case.set_evidence(MANUAL, Evidence(), record_failure(
-            "prepare-screenshots", exc, "Screenshots could not be loaded. Check the format, file size, and attachment count.",
-        ))
+    except (ImportError, OSError, ValueError) as exc:
+        st.session_state[warning_key] = record_failure(
+            "prepare-screenshots", exc, "Screenshots could not be loaded. Previously accepted screenshots were kept.",
+        )
 
 
 def show_evidence_assessment(result, provenance):
@@ -597,8 +601,11 @@ def show_evidence_investigation(case, workspace, attempt):
                 "Evidence screenshots", type=["png", "jpg", "jpeg", "webp"],
                 accept_multiple_files=True, key=key, on_change=capture_uploads, args=(case, key),
             )
+            if notice := st.session_state.get(f"{key}_warning"):
+                st.warning(failure_text(notice))
             if case.evidence.images or MANUAL in case.evidence_errors:
                 if st.button("Clear uploaded screenshots", key="wizard_clear_uploads"):
+                    st.session_state.pop(f"{key}_warning", None)
                     case.clear_manual_evidence()
                     if workspace.checkpoint(case):
                         st.rerun()
@@ -686,25 +693,20 @@ def show_final_report(case):
             st.code(markdown, language=None)
 
 
-def navigate(case, entry_ready, workspace):
+def navigate(step, entry_ready, has_assessment):
     with st.container(key="wizard-navigation"):
         back, skip, next_step = st.columns(3)
-        if back.button("Back", key="wizard_back", disabled=case.step == 0, width="stretch"):
-            case.step -= 1
-            return True
-        if case.step == 3 and not case.evidence_assessment:
+        if back.button("Back", key="wizard_back", disabled=step == 0, width="stretch"):
+            return step - 1
+        if step == 3 and not has_assessment:
             if skip.button("Skip evidence", key="wizard_skip_evidence", width="stretch"):
-                case.step = 4
-                return True
-        if case.step < len(STEPS) - 1 and next_step.button(
-            "Next", key="wizard_next", type="secondary" if case.step == 3 and not case.evidence_assessment else "primary",
-            disabled=case.step == 0 and not entry_ready, width="stretch",
+                return 4
+        if step < len(STEPS) - 1 and next_step.button(
+            "Next", key="wizard_next", type="secondary" if step == 3 and not has_assessment else "primary",
+            disabled=step == 0 and not entry_ready, width="stretch",
         ):
-            if workspace.editable and case.step == 0 and case.entry_source == "Manual entry":
-                case.commit_ticket(case.manual_draft)
-            case.step += 1
-            return True
-    return False
+            return step + 1
+    return step
 
 
 def main():
@@ -740,30 +742,33 @@ def main():
 
 def render_wizard(case, workspace, attempt):
     controls = st.container()
-    render_progress(st, PROGRESS, case.step)
+    editable = workspace.editable
+    view_key = wizard_key("readonly_view_step")
+    step = case.step if editable else st.session_state.get(view_key, case.step)
+    render_progress(st, PROGRESS, step)
     render_stage_heading(
-        st, case.ticket.lab_id, STEPS[case.step], STEP_DESCRIPTIONS[case.step], case.step + 1, len(STEPS),
+        st, case.ticket.lab_id, STEPS[step], STEP_DESCRIPTIONS[step], step + 1, len(STEPS),
     )
 
     entry_ready = True
-    if workspace.active and not workspace.editable:
+    if not editable:
         st.caption("Read-only case view")
-    if case.step == 0:
-        if workspace.editable:
+    if step == 0:
+        if editable:
             entry_ready = show_ticket_entry(case, workspace)
         else:
             ticket = case.manual_draft if workspace.conflicted and case.entry_source == "Manual entry" else case.ticket
             st.text(ticket.description)
             show_context(case.ticket)
-    elif case.step == 1:
-        if workspace.editable:
+    elif step == 1:
+        if editable:
             show_initial_analysis(case, workspace, attempt)
         else:
             show_module_status(case)
-    elif case.step == 2:
+    elif step == 2:
         show_initial_findings(case)
-    elif case.step == 3:
-        if workspace.editable:
+    elif step == 3:
+        if editable:
             show_evidence_investigation(case, workspace, attempt)
         else:
             show_screenshots(case)
@@ -771,10 +776,16 @@ def render_wizard(case, workspace, attempt):
                 show_evidence_assessment(case.evidence_assessment, case.evidence_provenance)
     else:
         show_final_report(case)
-    previous_step = case.step
-    moved = navigate(case, entry_ready, workspace)
-    saved = not workspace.editable or workspace.checkpoint(case, submit=moved and previous_step == 0)
-    if moved and saved:
+    target = navigate(step, entry_ready, bool(case.evidence_assessment))
+    moved = target != step
+    if editable:
+        if moved and step == 0 and case.entry_source == "Manual entry":
+            case.commit_ticket(case.manual_draft)
+        case.step = target
+        if workspace.checkpoint(case, submit=moved and step == 0) and moved:
+            st.rerun()
+    elif moved:
+        st.session_state[view_key] = target
         st.rerun()
     with controls:
         workspace.render_wizard_header(case)

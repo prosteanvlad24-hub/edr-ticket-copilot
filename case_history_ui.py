@@ -39,13 +39,38 @@ def _issue_report(repository, case_id, version):
     try:
         saved = repository.load(case_id, version=version)
         issued_at = datetime.now(timezone.utc).isoformat()
+        investigation = saved.investigation
+        displayed_modules = {
+            "ai": investigation.results.get("ai"),
+            "validation": investigation.prior_validation,
+            "evidence": investigation.evidence_assessment,
+        }
+        outputs = {
+            assessment_id: output
+            for assessment_id, output in repository.reviewable_outputs(case_id, version).items()
+            if displayed_modules[output[0]]
+        }
+        quality = {
+            row["assessment_id"]: {
+                key: row[key] for key in ("assessment_id", "assessment_version", "module", "quality", "review_version")
+            }
+            for row in repository.assessment_quality(case_id, version)
+        }
+        displayed = {
+            module: quality[assessment_id] if registered else {
+                "assessment_id": None, "assessment_version": None, "module": module,
+                "quality": AssessmentQuality.NOT_REVIEWED.value, "review_version": None,
+            }
+            for assessment_id, (module, registered, _) in outputs.items()
+        }
         audit = {
             "case_id": case_id, "version": version, "issued_at": issued_at,
             "lifecycle_status": saved.metadata.status.value,
             "incident_verdict": saved.metadata.incident_verdict.value,
+            "displayed_ai_assessments": displayed,
             "ai_assessment_quality": [
-                {key: row[key] for key in ("assessment_id", "assessment_version", "module", "quality", "review_version")}
-                for row in repository.assessment_quality(case_id, version)
+                dict(row, scope="displayed" if assessment_id in outputs else "historical")
+                for assessment_id, row in quality.items()
             ],
         }
         markdown, payload = build_report_exports(saved.investigation, audit=audit)

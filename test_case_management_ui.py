@@ -243,6 +243,72 @@ class CaseManagementUITest(unittest.TestCase):
         self.assertEqual(state.evidence_provenance, app.session_state["investigation"].evidence_provenance)
         self.assertEqual(saved.metadata, self.repository.load(saved.metadata.case_id).metadata)
 
+    def test_failed_manual_replacement_keeps_accepted_evidence_and_assessment(self):
+        with io.BytesIO() as buffer:
+            Image.new("RGB", (6, 6), "blue").save(buffer, format="PNG")
+            png = buffer.getvalue()
+        state = Investigation(step=3)
+        state.set_evidence(MANUAL, Evidence(("original.png",), (("image/png", png),), ("original.png",)))
+        state.reviewed_fingerprint, state.reviewed_evidence = state.fingerprint, ASSESSMENT
+        saved = self.repository.create("Manual screenshot replacement", state)
+        case_id = saved.metadata.case_id
+        app = self.start()
+        self.open_case(app, case_id)
+        for mixed in (False, True):
+            with self.subTest(mixed=mixed):
+                uploader = app.get("file_uploader")[0]
+                uploader.clear()
+                if mixed:
+                    uploader.upload("candidate.png", png, "image/png")
+                uploader.upload("broken.png", b"invalid image", "image/png")
+                self.run_app(app)
+                self.assertTrue(any("Previously accepted screenshots were kept" in item.value for item in app.warning))
+                self.assertEqual(state, app.session_state["investigation"])
+                self.assertEqual(saved, self.repository.load(case_id))
+        app.get("file_uploader")[0].clear()
+        self.run_app(app)
+        self.assertEqual(saved, self.repository.load(case_id))
+        app.get("file_uploader")[0].upload("valid.png", png, "image/png")
+        self.run_app(app)
+        replaced = self.repository.load(case_id)
+        self.assertEqual(2, replaced.metadata.version)
+        self.assertEqual(("valid.png",), replaced.investigation.evidence.filenames)
+        self.assertIsNone(replaced.investigation.evidence_assessment)
+        self.click(app, "wizard_clear_uploads")
+        cleared = self.repository.load(case_id)
+        self.assertEqual(3, cleared.metadata.version)
+        self.assertFalse(cleared.investigation.evidence.images)
+        self.assertEqual(saved, self.repository.load(case_id, version=1))
+
+    def test_archived_navigation_is_transient_and_switches_without_dirty_prompt(self):
+        original = self.repository.create("Archived review", Investigation(step=1))
+        case_id = original.metadata.case_id
+        archived = self.repository.transition(case_id, 1, CaseStatus.ARCHIVED)
+        target = self.repository.create("Next case")
+        app = self.start()
+        self.go_to(app, MANAGEMENT)
+        app.selectbox(key="case_status_filter").select("All statuses")
+        self.run_app(app)
+        self.open_case(app, case_id)
+        self.click(app, "wizard_next")
+        self.assertEqual("Initial Findings", app.title[0].value)
+        self.click(app, "wizard_back")
+        self.assertEqual("Initial Analysis", app.title[0].value)
+        self.click(app, "wizard_next")
+        self.assertEqual(1, app.session_state["investigation"].step)
+        view_key = f"case_{app.session_state['case_widget_namespace']}_readonly_view_step"
+        self.assertEqual(2, app.session_state[view_key])
+        self.open_case(app, target.metadata.case_id)
+        self.assertNotIn("case_pending_switch", app.session_state)
+        self.assertNotIn(view_key, app.session_state)
+        app = self.start()
+        self.go_to(app, MANAGEMENT)
+        app.selectbox(key="case_status_filter").select("All statuses")
+        self.run_app(app)
+        self.open_case(app, case_id)
+        self.assertEqual("Initial Analysis", app.title[0].value)
+        self.assertEqual(archived, self.repository.load(case_id))
+
     def test_dirty_open_can_cancel_then_save_before_switching(self):
         original = self.repository.create("Original case")
         target = self.repository.create("Destination case")
@@ -612,7 +678,10 @@ class CaseManagementUITest(unittest.TestCase):
         self.assertEqual("Stale edit", app.session_state["investigation"].manual_draft.description)
         self.go_to(app, WIZARD)
         self.assertTrue(app.button(key="case_save").disabled)
+        self.click(app, "wizard_next")
+        self.assertEqual(0, app.session_state["investigation"].step)
         self.request_open(app, case_id)
+        self.assertIn("case_pending_switch", app.session_state)
         self.click(app, "case_switch_discard")
         self.assertFalse(app.error)
         self.assertEqual(latest.investigation.manual_draft.description, self.widget(app, "text_area", "ticket_description").value)
@@ -794,6 +863,42 @@ class CaseManagementUITest(unittest.TestCase):
         _, label, rationale, _ = self.quality_form(app, "Initial AI analysis")
         self.assertEqual(("", ""), (label.value, rationale.value))
         self.assertEqual(second, self.repository.load(second_id))
+
+    def test_issued_report_links_exact_displayed_output_and_preserves_older_bytes(self):
+        state = Investigation(results={"ai": "Same response text"})
+        case = self.repository.create("Report assessment linkage", state)
+        case_id = case.metadata.case_id
+        old_id, = self.repository.reviewable_outputs(case_id, 1)
+        self.repository.review_assessment(case_id, 1, old_id, AssessmentQuality.CORRECT)
+        app = self.start()
+        self.go_to(app, MANAGEMENT)
+        app.selectbox(key="case_selected").select(case_id)
+        self.run_app(app)
+        self.click(app, f"audit_issue_{case_id}")
+        old_record, = self.repository.list_reports(case_id)
+        old_report = self.repository.get_report(case_id, old_record.id)
+        self.repository.save(case_id, 2, state, ai_module="ai")
+        new_id, = self.repository.reviewable_outputs(case_id, 3)
+        self.assertNotEqual(old_id, new_id)
+        self.run_app(app)
+        self.click(app, f"audit_issue_{case_id}")
+        _, latest = self.repository.list_reports(case_id)
+        report = self.repository.get_report(case_id, latest.id)
+        payload = json.loads(report.json_bytes)
+        self.assertEqual("Same response text", payload["initial_analysis"]["ai_analysis"])
+        audit = payload["case_audit"]
+        self.assertEqual(
+            {"assessment_id": new_id, "assessment_version": 3, "module": "ai",
+             "quality": "NOT_REVIEWED", "review_version": None},
+            audit["displayed_ai_assessments"]["ai"],
+        )
+        self.assertEqual([(old_id, "historical", "CORRECT"), (new_id, "displayed", "NOT_REVIEWED")],
+                         [(row["assessment_id"], row["scope"], row["quality"]) for row in audit["ai_assessment_quality"]])
+        current, historical = report.markdown_bytes.decode().split("### Historical AI assessment quality")
+        self.assertIn(f"Assessment {new_id} · Response version 3 · NOT_REVIEWED", current)
+        self.assertNotIn(old_id, current)
+        self.assertIn(f"Initial AI analysis · Assessment {old_id} · Response version 1 · CORRECT · Review version 2", historical)
+        self.assertEqual(old_report, self.repository.get_report(case_id, old_record.id))
 
     def test_add_note_and_download_exact_issued_report(self):
         case = self.repository.create("Audit records", Investigation(ticket=Ticket("Report source")))
