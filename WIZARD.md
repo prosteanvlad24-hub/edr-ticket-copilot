@@ -7,7 +7,7 @@ python -m pip install -r requirements.txt
 python -m streamlit run dashboard_v1_2.py --server.address=127.0.0.1
 ```
 
-Set `GEMINI_API_KEY` in the environment or a local `.env` to enable remote analysis. Local triage, IOC extraction, Ticket Lab generation and report exports work independently. Run validation and general Gemini analysis from step 2. Step 4 requires a separate confirmation after reviewing the exact screenshots. **Skip evidence** produces a preliminary report.
+Set `GEMINI_API_KEY` in the environment or a local `.env` to enable remote analysis. Local triage, IOC extraction, Ticket Lab generation and report exports work independently. In step 2, authorize and submit ticket validation and Gemini AI analysis separately. In step 4, review the selected screenshots and authorize that submission. Each form describes what Google Gemini receives. A retry requires a fresh confirmation. **Skip evidence** produces a preliminary report.
 
 Case data remains available while the Streamlit session is open. After returning to step 4, retained manual screenshots appear in the preview. Use **Clear uploaded screenshots** to remove them before making a new selection. Gemini results depend on the configured provider and require analyst verification. The app works with submitted case data and screenshots and has no live EDR connection.
 
@@ -20,7 +20,7 @@ Case data remains available while the Streamlit session is open. After returning
 | `ui_styles.py`, `.streamlit/config.toml`, `static/fonts/` | Design tokens, native Streamlit theme, responsive layout, and locally bundled IBM Plex fonts. After editing tokens, run `python ui_styles.py` and restart Streamlit. The font license files are bundled with the assets. |
 | `assets/` | Exact source PNG for the chess knight emblem, scaled sidebar and favicon images, and the decorative SVG used by the CSS background. |
 | `report_engine_v2.py` | Labels Markdown as preliminary or evidence reviewed. JSON retains its original ticket, validation and evidence fields and adds status and initial-analysis fields. |
-| `drive_streamlit.py` | Navigates the wizard or older tab-based dashboards using the existing benchmarking commands. |
+| `drive_streamlit.py` | Drives the current wizard and prompts the operator before each Google Gemini submission. |
 | `test_ticket_lab_integration.py` | Tests navigation, case transitions, both evidence sources, consent, exports, and provider failures with Gemini simulated. |
 
 Run the integration checks with `python -m unittest -v test_ticket_lab_integration`. The browser uploader simulation in Streamlit AppTest is available on newer Streamlit releases.

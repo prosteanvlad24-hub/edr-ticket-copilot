@@ -343,6 +343,14 @@ class CaseRepository:
         with self._transaction() as db:
             return self._load(db, self._row(db, case_id, version))
 
+    def require_current_version(self, case_id, expected_version):
+        """Check a session's version before an external side effect."""
+        with self._transaction() as db:
+            row = db.execute("SELECT row_version AS version FROM cases WHERE id = ?", (case_id,)).fetchone()
+            if row is None:
+                raise CaseConflictError("The saved case is no longer available")
+            self._check_version(row, expected_version)
+
     def list_cases(self, *, archived=False):
         with self._transaction() as db:
             rows = db.execute(

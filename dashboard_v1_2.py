@@ -1,13 +1,16 @@
 """EDR Ticket Copilot's five-step investigation workspace."""
 
+import hashlib
 import json
 import os
 from pathlib import Path
+from uuid import uuid4
 
 import streamlit as st
 
 from case_management_ui import MANAGEMENT, CaseWorkspace, navigation_view, wizard_key
 from evidence_inputs import MAX_IMAGE_BYTES, MAX_IMAGES, prepare_images
+from gemini_authorization import EVIDENCE_DISCLOSURE, TICKET_DISCLOSURE
 from investigation_state import LAB, MANUAL, Evidence, Investigation, Ticket
 from ioc_engine import extract_iocs
 from report_engine_v2 import build_report_exports
@@ -197,29 +200,25 @@ def analyze_iocs(ticket):
     return {"ticket": ticket.description, "indicators": extract_iocs(reported_ticket_text(ticket.description))}
 
 
-def analyze_validation(ticket):
+def analyze_validation(ticket, *, authorize):
     from ticket_validator import validate_ticket
 
-    return validate_ticket(ticket.description)
+    return validate_ticket(ticket.description, authorize=authorize)
 
 
-def analyze_ai(ticket):
+def analyze_ai(ticket, *, authorize):
     from ai_engine import analyze_ticket
 
-    return analyze_ticket(ticket.description)
+    return analyze_ticket(ticket.description, authorize=authorize)
 
 
-ANALYZERS = {"triage": analyze_triage, "iocs": analyze_iocs, "validation": analyze_validation, "ai": analyze_ai}
+LOCAL_ANALYZERS = {"triage": analyze_triage, "iocs": analyze_iocs}
 
 
 def run_modules(case, modules):
     for module in modules:
         try:
-            result = ANALYZERS[module](case.ticket)
-            if module == "validation":
-                case.save_validation(result)
-            else:
-                case.results[module] = result
+            case.results[module] = LOCAL_ANALYZERS[module](case.ticket)
             case.errors.pop(module, None)
         except Exception as exc:
             case.errors[module] = str(exc)
@@ -242,30 +241,76 @@ def show_module_status(case):
             st.code(error)
 
 
-def show_initial_analysis(case):
+def _capture_gemini_attempt(scope, confirmation_key):
+    st.session_state.gemini_attempt = (scope, st.session_state.get(confirmation_key, False))
+
+
+def authorize_gemini(workspace, attempt, *, action, label, disclosure, fingerprint):
+    current = workspace.active
+    scope = (action, fingerprint, current.case_id if current else None, current.version if current else None)
+    # Fields and triggers from an older render cannot authorize the current form.
+    form_key = f"gemini_{uuid4().hex}"
+    confirmation_key = f"{form_key}_{action}_consent"
+    enabled = bool(fingerprint) and (current is None or workspace.available)
+    with st.form(form_key):
+        st.caption(disclosure)
+        st.checkbox("I authorize this submission to Google Gemini", key=confirmation_key, disabled=not enabled)
+        st.form_submit_button(
+            label, key=f"{form_key}_{action}_send", disabled=not enabled,
+            on_click=_capture_gemini_attempt, args=(scope, confirmation_key),
+        )
+    if attempt is None or attempt[0][0] != action:
+        return False
+    if enabled and attempt == (scope, True):
+        return True
+    st.warning("Review the current payload and authorize this submission before sending it to Google Gemini.")
+    return False
+
+
+def run_gemini_module(case, workspace, module, analyzer):
+    try:
+        with st.spinner(f"Running {MODULES[module]}…"):
+            result = analyzer(case.ticket, authorize=workspace.check_gemini_version)
+    except Exception as exc:
+        case.errors[module] = str(exc)
+        return
+
+    def apply_result(investigation):
+        if module == "validation":
+            investigation.save_validation(result)
+        else:
+            investigation.results[module] = result
+        investigation.errors.pop(module, None)
+
+    workspace.save_gemini_result(case, apply_result)
+
+
+def show_initial_analysis(case, workspace, attempt):
     show_context(case.ticket)
     with st.container(key="initial-actions"):
-        full, local = st.columns([1.16, 1])
-        run_full = full.button("Run full initial analysis", type="primary", key="full_analysis_button", use_container_width=True)
-        run_local = local.button("Run local analysis", key="local_analysis_button", use_container_width=True)
-    if run_full:
-        with st.spinner("Running local analysis and Gemini checks..."):
-            run_modules(case, MODULES)
+        run_local = st.button("Run local analysis", type="primary", key="local_analysis_button", width="stretch")
     if run_local:
         with st.spinner("Running local triage and IOC extraction..."):
             run_modules(case, ("triage", "iocs"))
-    st.caption("Full analysis sends the ticket text to Gemini for validation and initial findings.")
     with st.expander("Run individual modules"):
         buttons = {
             "triage": ("Rule-based analysis", "rule_analysis_button"),
             "iocs": ("Extract IOCs", "ioc_extraction_button"),
-            "validation": ("Validate ticket request", "guided_validate"),
-            "ai": ("Gemini AI analysis", "gemini_analysis_button"),
         }
         for module, (label, key) in buttons.items():
             if st.button(label, key=key):
                 with st.spinner(f"Running {MODULES[module]}..."):
                     run_modules(case, (module,))
+    workspace.checkpoint(case)
+    st.subheader("Google Gemini analysis")
+    fingerprint = hashlib.sha256(case.ticket.description.encode("utf-8")).hexdigest() if case.ticket.description else None
+    for action, label, analyzer in (
+        ("validation", "Validate ticket request", analyze_validation),
+        ("ai", "Gemini AI analysis", analyze_ai),
+    ):
+        if authorize_gemini(workspace, attempt, action=action, label=label,
+                            disclosure=TICKET_DISCLOSURE, fingerprint=fingerprint):
+            run_gemini_module(case, workspace, action, analyzer)
     with st.container(key="analysis-status"):
         st.subheader("Module status")
         show_module_status(case)
@@ -469,7 +514,7 @@ def show_screenshots(case):
             st.image(data, width=670)
 
 
-def show_evidence_investigation(case, workspace):
+def show_evidence_investigation(case, workspace, attempt):
     if case.ticket.lab_id:
         source = st.radio(
             "Evidence source", [LAB, MANUAL], index=int(case.evidence_source == MANUAL),
@@ -495,27 +540,27 @@ def show_evidence_investigation(case, workspace):
                         st.rerun()
         show_screenshots(case)
 
+    workspace.checkpoint(case)
     fingerprint = case.fingerprint
-    consent = st.checkbox(
-        "I have reviewed the screenshots and authorize sending them, the ticket, and any prior validation to Gemini.",
-        value=bool(fingerprint and case.consent == fingerprint), disabled=not fingerprint,
-        key=wizard_key(f"guided_consent_{case.revision}_{case.evidence_revision}"),
-    )
-    case.consent = fingerprint if consent else None
-    if st.button("Analyze Evidence & Reassess", type="primary", key="guided_analyze_evidence", disabled=not case.consent):
+    if authorize_gemini(workspace, attempt, action="evidence", label="Analyze Evidence & Reassess",
+                        disclosure=EVIDENCE_DISCLOSURE, fingerprint=fingerprint):
         try:
             from evidence_engine import analyze_evidence
 
             with st.spinner("Gemini is reassessing the investigation..."):
                 result = analyze_evidence(
                     case.ticket.description, list(case.evidence.images), case.prior_validation,
-                    evidence_source=case.evidence_source,
+                    authorize=workspace.check_gemini_version, evidence_source=case.evidence_source,
                 )
-            case.reviewed_fingerprint = fingerprint
-            case.reviewed_evidence = result
-            case.reassessment_error = None
         except Exception as exc:
             case.reassessment_error = str(exc)
+        else:
+            def apply_result(investigation):
+                investigation.reviewed_fingerprint = fingerprint
+                investigation.reviewed_evidence = result
+                investigation.reassessment_error = None
+
+            workspace.save_gemini_result(case, apply_result)
 
     if case.reassessment_error:
         st.error("Evidence reassessment failed. You can retry or continue to the report.")
@@ -609,6 +654,8 @@ def main():
     if "investigation" not in st.session_state:
         st.session_state["investigation"] = Investigation()
     case = st.session_state["investigation"]
+    # A form callback creates a single-use intent before this rerun begins.
+    attempt = st.session_state.pop("gemini_attempt", None)
     workspace = CaseWorkspace()
     with st.sidebar:
         render_sidebar_brand(st)
@@ -617,12 +664,12 @@ def main():
     if view == MANAGEMENT:
         workspace.render_management(case)
     else:
-        render_wizard(case, workspace)
+        render_wizard(case, workspace, attempt)
     with sidebar_status:
         show_sidebar_status(case, workspace)
 
 
-def render_wizard(case, workspace):
+def render_wizard(case, workspace, attempt):
     controls = st.container()
     render_progress(st, PROGRESS, case.step)
     render_stage_heading(
@@ -641,14 +688,14 @@ def render_wizard(case, workspace):
             show_context(case.ticket)
     elif case.step == 1:
         if workspace.editable:
-            show_initial_analysis(case)
+            show_initial_analysis(case, workspace, attempt)
         else:
             show_module_status(case)
     elif case.step == 2:
         show_initial_findings(case)
     elif case.step == 3:
         if workspace.editable:
-            show_evidence_investigation(case, workspace)
+            show_evidence_investigation(case, workspace, attempt)
         else:
             show_screenshots(case)
             if case.evidence_assessment:

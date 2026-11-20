@@ -3,17 +3,14 @@ import json
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+from gemini_authorization import TICKET_DISCLOSURE, confirm_cli
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 from google import genai
 from google.genai import types
 
 
-MODELS = [
-    "gemini-3.5-flash-lite",
-    "gemini-3.1-flash-lite",
-    "gemini-3.5-flash",
-]
+MODEL = "gemini-3.5-flash-lite"
 
 
 SYSTEM_INSTRUCTIONS = """
@@ -104,7 +101,7 @@ enterprise endpoint security investigation.
 """
 
 
-def analyze_ticket(ticket: str) -> str:
+def analyze_ticket(ticket: str, *, authorize) -> str:
     """
     Analyze an endpoint security ticket using Gemini.
 
@@ -134,43 +131,17 @@ def analyze_ticket(ticket: str) -> str:
         + json.dumps({"ticket_description": ticket}, ensure_ascii=False)
     )
 
-    last_error = None
-
     try:
-        for model_name in MODELS:
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction=SYSTEM_INSTRUCTIONS,
-                        temperature=0.1,
-                        max_output_tokens=1800
-                    )
-                )
-
-                if response.text and response.text.strip():
-                    return response.text.strip()
-
-                last_error = RuntimeError(
-                    f"{model_name} returned an empty response."
-                )
-
-            except Exception as error:
-                last_error = error
-
-                error_code = getattr(
-                    error, "code", None
-                )
-
-                if error_code not in (
-                    404, 429, 500, 502, 503, 504
-                ):
-                    raise
-
-        raise RuntimeError(
-            f"Gemini analysis failed: {last_error}"
+        authorize()
+        response = client.models.generate_content(
+            model=MODEL, contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTIONS, temperature=0.1, max_output_tokens=1800,
+            ),
         )
+        if not response.text or not response.text.strip():
+            raise ValueError("Google Gemini returned an empty response.")
+        return response.text.strip()
 
     finally:
         client.close()
@@ -187,4 +158,4 @@ if __name__ == "__main__":
         "File MD5: d41d8cd98f00b204e9800998ecf8427e"
     )
 
-    print(analyze_ticket(sample_ticket))
+    print(analyze_ticket(sample_ticket, authorize=lambda: confirm_cli(TICKET_DISCLOSURE)))

@@ -7,8 +7,10 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
+from google import genai
 from PIL import Image
 import streamlit as st
 from streamlit.testing.v1 import AppTest
@@ -17,6 +19,7 @@ from case_management_ui import MANAGEMENT, WIZARD
 from case_repository import CaseRepository, CaseStatus, IncidentVerdict
 from investigation_state import LAB, MANUAL, Evidence, Investigation, Ticket
 from test_case_repository import PNG
+from test_ticket_lab_integration import ASSESSMENT, VALIDATION, gemini_confirmation, submit_gemini
 
 
 APP = Path(__file__).with_name("dashboard_v1_2.py")
@@ -193,14 +196,13 @@ class CaseManagementUITest(unittest.TestCase):
         app = self.start()
         with patch("evidence_engine.analyze_evidence") as send:
             self.open_case(app, evidence.metadata.case_id)
-            consent = next(item for item in app.checkbox if "guided_consent" in item.key)
+            consent = gemini_confirmation(app, "evidence")
             first_consent_key = consent.key
             self.assertFalse(consent.value)
             consent.check()
-            self.run_app(app)
             self.go_to(app, MANAGEMENT)
             self.go_to(app, WIZARD)
-            self.assertTrue(app.checkbox(key=first_consent_key).value)
+            self.assertFalse(gemini_confirmation(app, "evidence").value)
             self.assertEqual(1, self.repository.load(evidence.metadata.case_id).metadata.version)
             self.open_case(app, other.metadata.case_id)
             draft = self.widget(app, "text_area", "ticket_description")
@@ -208,10 +210,9 @@ class CaseManagementUITest(unittest.TestCase):
             draft.set_value("Unsaved edits")
             self.run_app(app)
             self.open_case(app, evidence.metadata.case_id)
-            consent = next(item for item in app.checkbox if "guided_consent" in item.key)
+            consent = gemini_confirmation(app, "evidence")
             self.assertNotEqual(first_consent_key, consent.key)
             self.assertFalse(consent.value)
-            self.assertTrue(app.button(key="guided_analyze_evidence").disabled)
             self.assertEqual(state.evidence_provenance, app.session_state["investigation"].evidence_provenance)
             self.open_case(app, other.metadata.case_id)
             self.assertEqual("Other case draft", self.widget(app, "text_area", "ticket_description").value)
@@ -227,6 +228,127 @@ class CaseManagementUITest(unittest.TestCase):
         self.open_case(app, saved.metadata.case_id)
         self.assertEqual(state.evidence_provenance, app.session_state["investigation"].evidence_provenance)
         self.assertEqual(saved.metadata, self.repository.load(saved.metadata.case_id).metadata)
+
+    def gemini_case(self, action):
+        state = Investigation(step=3 if action == "evidence" else 1, ticket=Ticket("Synthetic ticket", "high", 19, 7))
+        if action == "evidence":
+            state.save_validation(VALIDATION)
+            state.set_evidence(MANUAL, Evidence(images=(("image/png", PNG),), filenames=("private-name.png",)))
+        return self.repository.create(f"Authorization for {action}", state)
+
+    @staticmethod
+    def gemini_response(action):
+        return SimpleNamespace(text={"validation": json.dumps(VALIDATION), "ai": "Synthetic AI result",
+                                     "evidence": json.dumps(ASSESSMENT)}[action])
+
+    def test_gemini_actions_require_fresh_authorization_and_disclose_actual_payload(self):
+        for action in ("validation", "ai", "evidence"):
+            with self.subTest(action=action):
+                saved = self.gemini_case(action)
+                app = self.start()
+                self.open_case(app, saved.metadata.case_id)
+                send = Mock(return_value=self.gemini_response(action))
+                client = SimpleNamespace(models=SimpleNamespace(generate_content=send), close=Mock())
+                with patch.object(genai, "Client", return_value=client):
+                    disclosures = [item.value for item in app.caption if item.value.startswith("Destination: Google Gemini.")]
+                    self.assertEqual(1 if action == "evidence" else 2, len(disclosures))
+                    for disclosure in disclosures:
+                        self.assertIn("committed ticket text", disclosure)
+                        self.assertIn("other case evidence are excluded", disclosure)
+                        self.assertIn("offline hours", disclosure)
+                    gemini_confirmation(app, action).check()
+                    self.run_app(app)
+                    self.assertFalse(gemini_confirmation(app, action).value)
+                    submit_gemini(app, action, confirm=False)
+                    send.assert_not_called()
+                    submit_gemini(app, action)
+                    send.assert_called_once()
+                    contents = send.call_args.kwargs["contents"]
+                    if action == "evidence":
+                        for scope in ("selected prepared screenshot bytes", "screenshot IDs", "source labels", "prior AI ticket validation"):
+                            self.assertIn(scope, disclosures[0])
+                        text = json.loads(contents[0].text.split("\n", 1)[1])
+                        self.assertEqual({"ticket_description", "previous_validation_unverified", "screenshots"}, set(text))
+                        self.assertEqual(VALIDATION["reported_issue"], text["previous_validation_unverified"]["reported_issue"])
+                        self.assertEqual([{"id": "E01", "source": "Analyst upload"}], text["screenshots"])
+                        self.assertEqual([PNG], [part.inline_data.data for part in contents[1:]])
+                    else:
+                        self.assertIn("screenshots, and other case evidence are excluded", disclosures[0])
+                        text = json.loads(contents.split("\n", 1)[1])
+                        self.assertEqual({"ticket_description": "Synthetic ticket"}, text)
+                    submit_gemini(app, action, confirm=False)
+                    self.run_app(app)
+                    self.assertFalse(app.exception)
+                    send.assert_called_once()
+                self.assertEqual(2, self.repository.load(saved.metadata.case_id).metadata.version)
+
+    def test_gemini_authorization_is_consumed_even_after_provider_error(self):
+        for action in ("validation", "ai", "evidence"):
+            with self.subTest(action=action):
+                saved = self.gemini_case(action)
+                app = self.start()
+                self.open_case(app, saved.metadata.case_id)
+                failure = RuntimeError("Mock rate limit")
+                failure.code = 429
+                send = Mock(side_effect=failure)
+                client = SimpleNamespace(models=SimpleNamespace(generate_content=send), close=Mock())
+                with patch.object(genai, "Client", return_value=client):
+                    submit_gemini(app, action)
+                    send.assert_called_once()
+                    self.assertFalse(gemini_confirmation(app, action).value)
+                    submit_gemini(app, action, confirm=False)
+                    send.assert_called_once()
+                    submit_gemini(app, action)
+                    self.assertEqual(2, send.call_count)
+                self.assertFalse(app.exception)
+                self.assertEqual(saved.metadata, self.repository.load(saved.metadata.case_id).metadata)
+
+    def test_stale_gemini_sessions_do_not_send(self):
+        for action in ("validation", "ai", "evidence"):
+            with self.subTest(action=action):
+                saved = self.gemini_case(action)
+                case_id = saved.metadata.case_id
+                app = self.start()
+                self.open_case(app, case_id)
+                current = self.repository.transition(case_id, 1, CaseStatus.IN_PROGRESS)
+                send = Mock(return_value=self.gemini_response(action))
+                client = SimpleNamespace(models=SimpleNamespace(generate_content=send), close=Mock())
+                with patch.object(genai, "Client", return_value=client):
+                    submit_gemini(app, action)
+                send.assert_not_called()
+                self.assertFalse(app.exception)
+                self.assertTrue(any("Another session changed" in message.value for message in app.error))
+                self.assertEqual(current.metadata, self.repository.load(case_id).metadata)
+
+    def test_concurrent_edit_discards_gemini_response_before_live_or_durable_publication(self):
+        for action in ("validation", "ai", "evidence"):
+            with self.subTest(action=action):
+                saved = self.gemini_case(action)
+                case_id = saved.metadata.case_id
+                app = self.start()
+                self.open_case(app, case_id)
+
+                def respond(**kwargs):
+                    newer = self.repository.load(case_id).investigation
+                    newer.commit_ticket(Ticket("Other session edit"))
+                    self.repository.save(case_id, 1, newer)
+                    return self.gemini_response(action)
+
+                send = Mock(side_effect=respond)
+                client = SimpleNamespace(models=SimpleNamespace(generate_content=send), close=Mock())
+                with patch.object(genai, "Client", return_value=client):
+                    submit_gemini(app, action)
+                send.assert_called_once()
+                self.assertFalse(app.exception)
+                self.assertTrue(any("Another session changed" in message.value for message in app.error))
+                live = app.session_state["investigation"]
+                self.assertEqual(saved.investigation.results, live.results)
+                self.assertEqual(saved.investigation.evidence_by_source, live.evidence_by_source)
+                self.assertIsNone(live.evidence_assessment)
+                current = self.repository.load(case_id)
+                self.assertEqual("Other session edit", current.investigation.ticket.description)
+                self.assertEqual([1, 2], [version.version for version in self.repository.history(case_id)])
+                self.assertEqual(saved.investigation, self.repository.load(case_id, version=1).investigation)
 
     def test_stale_save_is_visible_and_reload_restores_latest(self):
         case = self.repository.create("Concurrency")

@@ -1,5 +1,6 @@
 """Streamlit navigation, case controls, and persistence checkpoints."""
 
+from copy import deepcopy
 import json
 import sqlite3
 from uuid import uuid4
@@ -158,6 +159,27 @@ class CaseWorkspace:
         st.session_state.case_saved_draft = saved.investigation.manual_draft
         st.session_state.case_unsaved_checkpoint = False
         return True
+
+    def check_gemini_version(self):
+        current = self.active
+        if current is not None:
+            if not self.available:
+                raise RuntimeError("Case storage is unavailable. No data was sent to Google Gemini.")
+            try:
+                self.repository.require_current_version(current.case_id, current.version)
+            except CaseConflictError:
+                st.session_state.case_conflict = True
+                st.rerun()
+
+    def save_gemini_result(self, investigation, apply_result):
+        if self.active is not None:
+            candidate = deepcopy(investigation)
+            apply_result(candidate)
+            if not self.checkpoint(candidate, explicit=True):
+                self.error = "Could not save the Google Gemini response. The response was discarded."
+                return
+        apply_result(investigation)
+        st.rerun()
 
     def _transition(self, label, target, rationale, investigation):
         if label in {"On Hold", "Close Resolved", "Close Inconclusive", "Reopen"} and not rationale.strip():

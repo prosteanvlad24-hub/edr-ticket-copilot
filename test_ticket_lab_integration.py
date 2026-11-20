@@ -61,6 +61,20 @@ def jpeg_with_exif():
         return buffer.getvalue()
 
 
+def gemini_button(app, action):
+    return next(button for button in app.button if button.key and button.key.endswith(f"_{action}_send"))
+
+
+def gemini_confirmation(app, action):
+    return next(checkbox for checkbox in app.checkbox if checkbox.key and checkbox.key.endswith(f"_{action}_consent"))
+
+
+def submit_gemini(app, action, *, confirm=True):
+    if confirm:
+        gemini_confirmation(app, action).check()
+    return gemini_button(app, action).click().run()
+
+
 class TicketLabIntegrationTest(unittest.TestCase):
     def setUp(self):
         scratch = tempfile.TemporaryDirectory()
@@ -183,17 +197,18 @@ class TicketLabIntegrationTest(unittest.TestCase):
             self.assertEqual([], calls)
 
             self.navigate(app, "Initial Analysis")
-            app.button(key="full_analysis_button").click().run()
+            app.button(key="local_analysis_button").click().run()
+            submit_gemini(app, "validation")
+            submit_gemini(app, "ai")
             self.assertEqual(2, len(calls))
             self.assertEqual({"triage", "iocs", "validation", "ai"}, set(case.results))
             self.navigate(app, "Initial Findings")
             self.navigate(app, "Evidence Investigation")
             self.assertEqual(1, len(app.get("image")))
-            self.assertTrue(app.button(key="guided_analyze_evidence").proto.disabled)
+            submit_gemini(app, "evidence", confirm=False)
             self.assertEqual(2, len(calls))
 
-            app.checkbox[0].check().run()
-            app.button(key="guided_analyze_evidence").click().run()
+            submit_gemini(app, "evidence")
             self.assertEqual(3, len(calls))
             parts, _ = calls[-1]
             self.assertIn(ticket.lab_id, parts[0].text)
@@ -211,15 +226,14 @@ class TicketLabIntegrationTest(unittest.TestCase):
             self.assertEqual(ASSESSMENT, reviewed["evidence_assessment"])
             self.assertNotIn(PRIVATE_MARKER, repr(exports))
             self.navigate(app, "Evidence Investigation", "wizard_back")
-            self.assertTrue(app.checkbox[0].value)
+            self.assertFalse(gemini_confirmation(app, "evidence").value)
             self.assertEqual(1, len(app.get("image")))
 
             other_image = list_evidence(run, ticket.lab_id)[1]
             app.multiselect[0].set_value([other_image]).run()
             self.assertEqual(ticket, case.ticket)
             self.assertIsNone(case.evidence_assessment)
-            self.assertFalse(app.checkbox[0].value)
-            self.assertTrue(app.button(key="guided_analyze_evidence").proto.disabled)
+            self.assertFalse(gemini_confirmation(app, "evidence").value)
             downloads.reset_mock()
             self.navigate(app, "Final Report", "wizard_skip_evidence")
             exports = {call.kwargs["key"]: call.kwargs["data"] for call in downloads.call_args_list}
@@ -247,8 +261,7 @@ class TicketLabIntegrationTest(unittest.TestCase):
                 self.navigate(app, "Initial Findings", "wizard_back")
                 self.navigate(app, "Evidence Investigation")
                 self.assertEqual(1, len(app.get("image")))
-                app.checkbox[0].check().run()
-                app.button(key="guided_analyze_evidence").click().run()
+                submit_gemini(app, "evidence")
                 self.assertEqual(4, len(calls))
                 manual_parts, _ = calls[-1]
                 self.assertIn("Manual investigator notes", manual_parts[0].text)
@@ -268,7 +281,9 @@ class TicketLabIntegrationTest(unittest.TestCase):
         ):
             app = self.create_app()
             self.navigate(app, "Initial Analysis")
-            app.button(key="full_analysis_button").click().run()
+            app.button(key="local_analysis_button").click().run()
+            submit_gemini(app, "validation")
+            submit_gemini(app, "ai")
             case = app.session_state["investigation"]
             self.assertEqual({"validation", "ai"}, set(case.errors))
             self.assertEqual({"triage", "iocs"}, set(case.results))
