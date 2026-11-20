@@ -2,6 +2,47 @@
 from datetime import datetime, timezone
 from typing import Any
 
+from investigation_state import LAB
+
+
+def build_report_exports(case, *, audit=None):
+    """Build both export formats from saved inputs without running analysis."""
+    evidence = case.evidence_assessment
+    provenance = case.evidence_provenance if evidence else []
+    triage = case.results.get("triage")
+    validation = case.prior_validation
+    analysis = case.results.get("ai")
+    markdown = generate_investigation_report(
+        description=case.ticket.description, rule_result=triage, ioc_result=case.results.get("iocs"),
+        ai_analysis=analysis, validation=validation, evidence_assessment=evidence,
+        synthetic_evidence=bool(evidence and case.evidence_source == LAB), evidence_provenance=provenance,
+    )
+    payload = {
+        "report_status": "evidence_reviewed" if evidence else "preliminary",
+        "ticket": case.ticket.description,
+        "validation": validation,
+        "evidence_assessment": evidence,
+        "evidence_provenance": provenance,
+        "initial_analysis": {
+            "rule_based_triage": triage,
+            "indicators": case.results.get("iocs"),
+            "ai_analysis": analysis,
+        },
+    }
+    if audit is not None:
+        payload["case_audit"] = audit
+        quality = audit["ai_assessment_quality"]
+        markdown += (
+            "\n## Case audit metadata\n\n"
+            f"- Case ID: {audit['case_id']}\n- Case version: {audit['version']}\n"
+            f"- Issued (UTC): {audit['issued_at']}\n- Lifecycle status: {audit['lifecycle_status']}\n"
+            f"- Incident verdict: {audit['incident_verdict']}\n"
+            "\n### Recorded AI assessment quality\n\n"
+            + _bullet([f"{row['assessment_id']} (version {row['assessment_version']}): {row['quality']}" for row in quality],
+                      "No saved AI assessment quality records.")
+        )
+    return markdown, payload
+
 
 def _s(value: Any) -> str:
     return str(value if value is not None else "Not available").replace("\x00", "")

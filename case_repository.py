@@ -84,6 +84,33 @@ class SavedCase:
     investigation: Investigation
 
 
+@dataclass(frozen=True)
+class AnalystNote:
+    id: str
+    case_id: str
+    version: int
+    author_label: str
+    created_at: str
+    body: str
+    supersedes_note_id: str | None
+
+
+@dataclass(frozen=True)
+class ReportRecord:
+    id: str
+    case_id: str
+    version: int
+    issued_at: str
+    report_status: str
+
+
+@dataclass(frozen=True)
+class IssuedReport:
+    metadata: ReportRecord
+    markdown_bytes: bytes
+    json_bytes: bytes
+
+
 def default_database_path():
     configured = os.getenv("EDR_CASE_DB_PATH")
     if configured:
@@ -334,6 +361,84 @@ class CaseRepository:
                    WHERE v.case_id = ? ORDER BY v.version""", (case_id,),
             )
             return [self._metadata(row) for row in rows]
+
+    def list_notes(self, case_id):
+        with self._transaction() as db:
+            rows = db.execute(
+                "SELECT * FROM analyst_notes WHERE case_id = ? ORDER BY version, created_at, id", (case_id,),
+            )
+            return [AnalystNote(**dict(row)) for row in rows]
+
+    def add_note(self, case_id, expected_version, author_label, body, *, supersedes_note_id=None):
+        author_label, body = author_label.strip(), body.strip()
+        if not author_label or not body:
+            raise ValueError("An author and note are required")
+        with self._transaction(write=True) as db:
+            self._check_version(self._row(db, case_id), expected_version)
+            if supersedes_note_id is not None and not db.execute(
+                "SELECT 1 FROM analyst_notes WHERE case_id = ? AND id = ?", (case_id, supersedes_note_id),
+            ).fetchone():
+                raise ValueError("The original note must belong to this case")
+            note = AnalystNote(str(uuid4()), case_id, expected_version, author_label, _timestamp(), body, supersedes_note_id)
+            db.execute(
+                """INSERT INTO analyst_notes
+                   (id, case_id, version, author_label, created_at, body, supersedes_note_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (note.id, note.case_id, note.version, note.author_label, note.created_at, note.body, note.supersedes_note_id),
+            )
+            return note
+
+    def list_reports(self, case_id):
+        with self._transaction() as db:
+            rows = db.execute(
+                """SELECT id, case_id, version, issued_at, report_status FROM case_reports
+                   WHERE case_id = ? ORDER BY version, issued_at, id""", (case_id,),
+            )
+            return [ReportRecord(**dict(row)) for row in rows]
+
+    def get_report(self, case_id, report_id):
+        with self._transaction() as db:
+            row = db.execute("SELECT * FROM case_reports WHERE case_id = ? AND id = ?", (case_id, report_id)).fetchone()
+            if row is None:
+                raise KeyError((case_id, report_id))
+            fields = dict(row)
+            markdown_bytes, json_bytes = fields.pop("markdown_bytes"), fields.pop("json_bytes")
+            return IssuedReport(ReportRecord(**fields), markdown_bytes, json_bytes)
+
+    def issue_report(self, case_id, expected_version, report_status, markdown_bytes, json_bytes, *, issued_at=None):
+        if report_status not in {"preliminary", "evidence_reviewed"}:
+            raise ValueError("Invalid report status")
+        if not all(isinstance(content, bytes) and content for content in (markdown_bytes, json_bytes)):
+            raise ValueError("Both report artifacts must be nonempty bytes")
+        timestamp = datetime.fromisoformat(issued_at) if issued_at is not None else datetime.now(timezone.utc)
+        if timestamp.utcoffset() != timezone.utc.utcoffset(None):
+            raise ValueError("Report issuance time must be in UTC")
+        with self._transaction(write=True) as db:
+            self._check_version(self._row(db, case_id), expected_version)
+            report = ReportRecord(str(uuid4()), case_id, expected_version, timestamp.isoformat(), report_status)
+            db.execute(
+                """INSERT INTO case_reports
+                   (id, case_id, version, issued_at, report_status, markdown_bytes, json_bytes)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (report.id, case_id, expected_version, report.issued_at, report_status, markdown_bytes, json_bytes),
+            )
+            return report
+
+    def assessment_quality(self, case_id, version):
+        """Return recorded quality as of a version, independently of the incident verdict."""
+        with self._transaction() as db:
+            rows = db.execute(
+                """SELECT a.id AS assessment_id, a.version AS assessment_version, a.module,
+                          COALESCE(r.quality, ?) AS quality, r.version AS review_version
+                   FROM ai_assessments a LEFT JOIN ai_assessment_reviews r ON r.id = (
+                       SELECT review.id FROM ai_assessment_reviews review
+                       WHERE review.case_id = a.case_id AND review.assessment_id = a.id AND review.version <= ?
+                       ORDER BY review.version DESC, review.created_at DESC, review.id DESC LIMIT 1
+                   )
+                   WHERE a.case_id = ? AND a.version <= ? ORDER BY a.version, a.created_at, a.id""",
+                (AssessmentQuality.NOT_REVIEWED, version, case_id, version),
+            )
+            return [dict(row) for row in rows]
 
     @staticmethod
     def _check_version(row, expected_version):

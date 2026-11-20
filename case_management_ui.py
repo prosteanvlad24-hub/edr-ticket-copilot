@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import streamlit as st
 
+from case_history_ui import render_case_history
 from case_repository import CaseConflictError, CaseRepository, CaseStatus
 from case_serialization import encode_state
 from investigation_state import Investigation
@@ -205,9 +206,12 @@ class CaseWorkspace:
             st.button("Back to Investigation Wizard", icon=":material/arrow_back:", key="management_back",
                       on_click=_set_view, args=(WIZARD,))
         if self.available:
-            self._render_case_list()
+            selected = self._render_case_list()
             if self.active is not None:
                 self._render_lifecycle(investigation)
+            audit_case_id = selected or (self.active.case_id if self.active is not None else None)
+            if self.available and audit_case_id is not None:
+                render_case_history(self.repository, audit_case_id)
         self._show_messages()
 
     def _render_case_list(self):
@@ -264,6 +268,7 @@ class CaseWorkspace:
                 self._activate(self.repository.create(title, Investigation()), open_wizard=True)
             except (OSError, sqlite3.Error, ValueError):
                 self.error = "Could not create the case. Check the configured database path and permissions."
+        return selected
 
     def _render_lifecycle(self, investigation):
         current = self.active

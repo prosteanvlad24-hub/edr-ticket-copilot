@@ -1,11 +1,16 @@
 """Exercise the case controls through the existing Streamlit entry point."""
 
+import hashlib
+import io
+import json
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from PIL import Image
+import streamlit as st
 from streamlit.testing.v1 import AppTest
 
 from case_management_ui import MANAGEMENT, WIZARD
@@ -120,7 +125,7 @@ class CaseManagementUITest(unittest.TestCase):
                     self.assertNotIn("local_analysis_button", [button.key for button in app.button])
                     self.assertTrue(app.button(key="case_save").disabled)
                     self.go_to(app, MANAGEMENT)
-        self.assertFalse(app.dataframe)
+        self.assertFalse(any("Case ID" in item.value for item in app.dataframe))
         app.selectbox(key="case_status_filter").select("ARCHIVED")
         self.run_app(app)
         self.assertEqual(case_id, app.dataframe[0].value.iloc[0]["Case ID"])
@@ -224,3 +229,84 @@ class CaseManagementUITest(unittest.TestCase):
         self.open_case(app, case_id)
         self.assertFalse(app.error)
         self.assertEqual(latest.investigation.manual_draft.description, self.widget(app, "text_area", "ticket_description").value)
+
+    def test_history_inspection_preserves_live_case_and_never_calls_gemini(self):
+        live = self.repository.create("Live case")
+        previous = Investigation(ticket=Ticket("Historical ticket"), results={"ai": "Saved AI conclusion"})
+        with io.BytesIO() as buffer:
+            Image.new("RGB", (16, 16), "navy").save(buffer, format="PNG")
+            valid_png = buffer.getvalue()
+        previous.set_evidence(MANUAL, Evidence(
+            images=(("image/png", valid_png), ("image/png", PNG)), filenames=("history.png", "invalid.png"),
+        ))
+        historical = self.repository.create("Historical case", previous)
+        case_id = historical.metadata.case_id
+        active = self.repository.transition(case_id, 1, CaseStatus.IN_PROGRESS)
+        held = self.repository.transition(case_id, active.metadata.version, CaseStatus.ON_HOLD, rationale="Waiting for logs")
+        before = self.repository.history(case_id)
+        app = self.start()
+        self.open_case(app, live.metadata.case_id)
+        self.widget(app, "text_area", "ticket_description").set_value("Live unsaved draft")
+        self.run_app(app)
+        self.go_to(app, MANAGEMENT)
+        app.selectbox(key="case_selected").select(case_id)
+        self.run_app(app)
+        self.assertEqual([1, 2, 3], app.dataframe[1].value["Version"].tolist())
+        self.assertEqual("Waiting for logs", app.dataframe[1].value.iloc[-1]["Transition reason"])
+        with patch("ai_engine.analyze_ticket") as ai, patch("evidence_engine.analyze_evidence") as evidence, \
+                patch("ticket_validator.validate_ticket") as validation, patch("case_history_ui.build_report_exports") as build:
+            app.selectbox(key=f"audit_version_{case_id}").select(1)
+            self.run_app(app)
+            self.assertIn("Historical ticket", [item.value for item in app.text])
+            self.assertIn("Saved AI conclusion", [item.value for item in app.text])
+            self.assertIn(hashlib.sha256(valid_png).hexdigest(), [item.value for item in app.code])
+            self.assertTrue(any(item.value.startswith("E01 ·") for item in app.text))
+            self.assertIn("No reports have been issued for this case.", [item.value for item in app.caption])
+            app.toggle(key=f"audit_previews_{case_id}_1").set_value(True)
+            with patch.object(st, "image", wraps=st.image) as show_image:
+                self.run_app(app)
+                show_image.assert_called_once()
+            self.assertTrue(any("Preview unavailable" in warning.value for warning in app.warning))
+            self.run_app(app)
+            for endpoint in (ai, evidence, validation, build):
+                endpoint.assert_not_called()
+        self.assertEqual(before, self.repository.history(case_id))
+        self.assertEqual(held.metadata, self.repository.load(case_id).metadata)
+        self.assertEqual([], self.repository.list_reports(case_id))
+        self.click(app, "management_back")
+        self.assertEqual(live.metadata, app.session_state["case_metadata"])
+        self.assertEqual("Live unsaved draft", self.widget(app, "text_area", "ticket_description").value)
+
+    def test_add_note_and_download_exact_issued_report(self):
+        case = self.repository.create("Audit records", Investigation(ticket=Ticket("Report source")))
+        case_id = case.metadata.case_id
+        app = self.start()
+        self.go_to(app, MANAGEMENT)
+        app.selectbox(key="case_selected").select(case_id)
+        self.run_app(app)
+        app.toggle(key=f"audit_note_toggle_{case_id}").set_value(True)
+        self.run_app(app)
+        app.text_input(key=f"audit_author_{case_id}").set_value("Analyst A")
+        app.text_area(key=f"audit_body_{case_id}").set_value("Manually verified the ticket")
+        next(button for button in app.button if button.label == "Add analyst note").click()
+        self.run_app(app)
+        note, = self.repository.list_notes(case_id)
+        self.assertEqual(("Analyst A", "Manually verified the ticket", 1), (note.author_label, note.body, note.version))
+        self.assertIn("Manually verified the ticket", [item.value for item in app.text])
+        self.click(app, f"audit_issue_{case_id}")
+        stored, = self.repository.list_reports(case_id)
+        report = self.repository.get_report(case_id, stored.id)
+        self.assertIn(b"Report source", report.markdown_bytes)
+        fields = json.loads(report.json_bytes)["case_audit"]
+        self.assertEqual(stored.issued_at, fields["issued_at"])
+        self.assertEqual("DRAFT", fields["lifecycle_status"])
+        self.assertEqual("NOT_ASSESSED", fields["incident_verdict"])
+        self.assertEqual([], fields["ai_assessment_quality"])
+        self.repository.transition(case_id, 1, CaseStatus.IN_PROGRESS)
+        with patch("case_history_ui.build_report_exports") as build, patch.object(st, "download_button", wraps=st.download_button) as download:
+            app.selectbox(key=f"audit_report_{case_id}").select(stored.id)
+            self.run_app(app)
+            build.assert_not_called()
+            self.assertEqual([report.markdown_bytes, report.json_bytes], [call.args[1] for call in download.call_args_list])
+        self.assertEqual([1, 2], [entry.version for entry in self.repository.history(case_id)])
+        self.assertEqual([stored], self.repository.list_reports(case_id))

@@ -166,6 +166,12 @@ class CaseRepositoryTest(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
                     db.execute(statement)
+            db.execute("INSERT INTO ai_assessment_reviews VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
+                       ("later-review", case_id, reopened.metadata.version, "assessment", "Analyst",
+                        reopened.metadata.saved_at, AssessmentQuality.PARTIALLY_CORRECT))
+        self.assertEqual(AssessmentQuality.INCORRECT, self.repository.assessment_quality(case_id, 1)[0]["quality"])
+        self.assertEqual(AssessmentQuality.PARTIALLY_CORRECT,
+                         self.repository.assessment_quality(case_id, reopened.metadata.version)[0]["quality"])
 
     def test_evidence_round_trip_and_integrity(self):
         state = Investigation()
@@ -223,3 +229,33 @@ class CaseRepositoryTest(unittest.TestCase):
         self.assertEqual(case.metadata, self.repository.load(case_id).metadata)
         with closing(sqlite3.connect(self.path)) as db, db:
             self.assertEqual(0, db.execute("SELECT count(*) FROM evidence_assets").fetchone()[0])
+
+    def test_notes_and_issued_reports_are_versioned_without_rewriting_snapshots(self):
+        case = self.repository.create("Audit")
+        other = self.repository.create("Other audit")
+        case_id = case.metadata.case_id
+        note = self.repository.add_note(case_id, 1, "Analyst", "Original note")
+        original = self.repository.issue_report(case_id, 1, "preliminary", b"# Original\r\n", b'{"original":true}')
+        self.assertEqual([case.metadata], self.repository.history(case_id))
+        active = self.move(case, CaseStatus.IN_PROGRESS)
+        with self.assertRaises(CaseConflictError):
+            self.repository.add_note(case_id, 1, "Analyst", "Stale note")
+        with self.assertRaises(CaseConflictError):
+            self.repository.issue_report(case_id, 1, "preliminary", b"stale", b"{}")
+        with self.assertRaises(ValueError):
+            self.repository.add_note(other.metadata.case_id, 1, "Analyst", "Invalid correction", supersedes_note_id=note.id)
+        with self.assertRaises(KeyError):
+            self.repository.get_report(other.metadata.case_id, original.id)
+        correction = self.repository.add_note(case_id, 2, "Analyst", "New finding", supersedes_note_id=note.id)
+        later = self.repository.issue_report(case_id, 2, "preliminary", b"# Second", b"{}")
+        self.assertEqual([note, correction], self.repository.list_notes(case_id))
+        self.assertEqual([original, later], self.repository.list_reports(case_id))
+        issued = self.repository.get_report(case_id, original.id)
+        self.assertEqual(original, issued.metadata)
+        self.assertEqual(b"# Original\r\n", issued.markdown_bytes)
+        self.assertEqual(b'{"original":true}', issued.json_bytes)
+        self.assertEqual([case.metadata, active.metadata], self.repository.history(case_id))
+        with closing(sqlite3.connect(self.path)) as db, db:
+            for sql in ("DELETE FROM analyst_notes", "UPDATE case_reports SET json_bytes = X'00'"):
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+                    db.execute(sql)

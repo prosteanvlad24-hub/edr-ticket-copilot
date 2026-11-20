@@ -10,7 +10,7 @@ from case_management_ui import MANAGEMENT, CaseWorkspace, navigation_view, wizar
 from evidence_inputs import MAX_IMAGE_BYTES, MAX_IMAGES, prepare_images
 from investigation_state import LAB, MANUAL, Evidence, Investigation, Ticket
 from ioc_engine import extract_iocs
-from report_engine_v2 import generate_investigation_report
+from report_engine_v2 import build_report_exports
 from rules_engine import classify_ticket, get_troubleshooting_steps, ransomware_signals, reported_ticket_text
 from severity_engine import assess_severity, source_reported_severity
 from ticket_lab_inputs import list_evidence, list_runs, read_case, read_catalog
@@ -555,24 +555,7 @@ def show_final_report(case):
         if not evidence and triage and triage["steps"]:
             st.markdown("**Recommended next steps**")
             show_lines(triage["steps"])
-    markdown = generate_investigation_report(
-        description=case.ticket.description, rule_result=triage, ioc_result=case.results.get("iocs"),
-        ai_analysis=analysis, validation=validation, evidence_assessment=evidence,
-        synthetic_evidence=bool(evidence and case.evidence_source == LAB),
-        evidence_provenance=provenance,
-    )
-    payload = {
-        "report_status": "evidence_reviewed" if evidence else "preliminary",
-        "ticket": case.ticket.description,
-        "validation": validation,
-        "evidence_assessment": evidence,
-        "evidence_provenance": provenance,
-        "initial_analysis": {
-            "rule_based_triage": triage,
-            "indicators": case.results.get("iocs"),
-            "ai_analysis": analysis,
-        },
-    }
+    markdown, payload = build_report_exports(case)
     left, right = st.columns(2)
     with left:
         st.download_button(
