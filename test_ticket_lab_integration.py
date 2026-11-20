@@ -258,6 +258,8 @@ class TicketLabIntegrationTest(unittest.TestCase):
             uploader = app.get("file_uploader")[0]
             if hasattr(uploader, "upload"):
                 uploader.upload("manual.jpg", jpeg_with_exif(), "image/jpeg").run()
+                self.assertEqual(0, len(app.get("image")))
+                next(button for button in app.button if button.label == "Apply screenshot replacement").click().run()
                 self.assertEqual(1, len(app.get("image")))
                 self.navigate(app, "Initial Findings", "wizard_back")
                 self.navigate(app, "Evidence Investigation")

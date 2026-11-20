@@ -252,10 +252,15 @@ class CaseManagementUITest(unittest.TestCase):
         state.reviewed_fingerprint, state.reviewed_evidence = state.fingerprint, ASSESSMENT
         saved = self.repository.create("Manual screenshot replacement", state)
         case_id = saved.metadata.case_id
+        issued = self.repository.issue_report(case_id, 1, "evidence_reviewed", b"Earlier markdown", b'{"earlier":true}')
+        earlier_report = self.repository.get_report(case_id, issued.id)
         app = self.start()
         self.open_case(app, case_id)
         for mixed in (False, True):
             with self.subTest(mixed=mixed):
+                app.get("file_uploader")[0].clear().upload("staged.png", png, "image/png")
+                self.run_app(app)
+                self.assertTrue(any(button.label == "Apply screenshot replacement" for button in app.button))
                 uploader = app.get("file_uploader")[0]
                 uploader.clear()
                 if mixed:
@@ -263,6 +268,7 @@ class CaseManagementUITest(unittest.TestCase):
                 uploader.upload("broken.png", b"invalid image", "image/png")
                 self.run_app(app)
                 self.assertTrue(any("Previously accepted screenshots were kept" in item.value for item in app.warning))
+                self.assertFalse(any(button.label == "Apply screenshot replacement" for button in app.button))
                 self.assertEqual(state, app.session_state["investigation"])
                 self.assertEqual(saved, self.repository.load(case_id))
         app.get("file_uploader")[0].clear()
@@ -270,15 +276,56 @@ class CaseManagementUITest(unittest.TestCase):
         self.assertEqual(saved, self.repository.load(case_id))
         app.get("file_uploader")[0].upload("valid.png", png, "image/png")
         self.run_app(app)
+        self.assertEqual(saved, self.repository.load(case_id))
+        self.assertEqual(state, app.session_state["investigation"])
+        self.assertIn("valid.png", [item.value for item in app.text])
+        apply = next(button for button in app.button if button.label == "Apply screenshot replacement")
+        self.click(app, apply.key)
         replaced = self.repository.load(case_id)
         self.assertEqual(2, replaced.metadata.version)
         self.assertEqual(("valid.png",), replaced.investigation.evidence.filenames)
         self.assertIsNone(replaced.investigation.evidence_assessment)
+        self.assertEqual(state.evidence_revision + 1, replaced.investigation.evidence_revision)
+        self.assertFalse(any(button.label == "Apply screenshot replacement" for button in app.button))
+        self.run_app(app)
+        self.assertEqual(replaced, self.repository.load(case_id))
         self.click(app, "wizard_clear_uploads")
         cleared = self.repository.load(case_id)
         self.assertEqual(3, cleared.metadata.version)
         self.assertFalse(cleared.investigation.evidence.images)
         self.assertEqual(saved, self.repository.load(case_id, version=1))
+        self.assertEqual(earlier_report, self.repository.get_report(case_id, issued.id))
+
+    def test_manual_replacement_failed_or_stale_save_preserves_accepted_evidence(self):
+        for stale in (False, True):
+            with self.subTest(stale=stale):
+                with io.BytesIO() as buffer:
+                    Image.new("RGB", (6, 6), "blue").save(buffer, format="PNG")
+                    png = buffer.getvalue()
+                state = Investigation(step=3)
+                state.set_evidence(MANUAL, Evidence(("original.png",), (("image/png", png),), ("original.png",)))
+                state.reviewed_fingerprint, state.reviewed_evidence = state.fingerprint, ASSESSMENT
+                saved = self.repository.create(f"Apply conflict {stale}", state)
+                case_id = saved.metadata.case_id
+                app = self.start()
+                self.open_case(app, case_id)
+                app.get("file_uploader")[0].upload("candidate.png", png, "image/png")
+                self.run_app(app)
+                apply = next(button for button in app.button if button.label == "Apply screenshot replacement")
+                if stale:
+                    latest = self.repository.set_incident_verdict(case_id, 1, IncidentVerdict.BENIGN)
+                    self.click(app, apply.key)
+                    self.assertTrue(any("Another session changed" in item.value for item in app.error))
+                    self.assertFalse(any(button.label == "Apply screenshot replacement" for button in app.button))
+                    self.assertEqual(latest, self.repository.load(case_id).metadata)
+                else:
+                    with patch.object(CaseRepository, "save", side_effect=OSError("simulated write failure")):
+                        self.click(app, apply.key)
+                    self.assertTrue(any("Could not save" in item.value for item in app.error))
+                    self.assertEqual(saved.metadata, self.repository.load(case_id).metadata)
+                self.assertEqual(state, app.session_state["investigation"])
+                self.assertEqual(state, self.repository.load(case_id).investigation)
+                self.assertEqual(saved, self.repository.load(case_id, version=1))
 
     def test_archived_navigation_is_transient_and_switches_without_dirty_prompt(self):
         original = self.repository.create("Archived review", Investigation(step=1))

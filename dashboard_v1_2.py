@@ -1,5 +1,6 @@
 """EDR Ticket Copilot's five-step investigation workspace."""
 
+from copy import deepcopy
 import hashlib
 import json
 import os
@@ -499,10 +500,11 @@ def load_lab_evidence(case, warning_key):
     )
 
 
-def capture_uploads(case, key):
+def capture_uploads(case, key, version):
     files = st.session_state.get(key) or []
     warning_key = f"{key}_warning"
     st.session_state.pop(warning_key, None)
+    st.session_state.pop(f"{key}_candidate", None)
     if not files:
         return
     try:
@@ -512,11 +514,57 @@ def capture_uploads(case, key):
             raise ValueError("Each screenshot must be nonempty and at most 8 MiB.")
         images = prepare_images([(item.name, item.getvalue()) for item in files])
         names = tuple(item.name.replace("\\", "/").rsplit("/", 1)[-1] for item in files)
-        case.set_evidence(MANUAL, Evidence(names, tuple(images), names))
     except (ImportError, OSError, ValueError) as exc:
         st.session_state[warning_key] = record_failure(
             "prepare-screenshots", exc, "Screenshots could not be loaded. Previously accepted screenshots were kept.",
         )
+    else:
+        st.session_state[f"{key}_candidate"] = (
+            version, case.evidence_revision, uuid4().hex, Evidence(names, tuple(images), names),
+        )
+
+
+def _commit_manual_evidence(case, workspace, key, evidence=None):
+    updated = deepcopy(case)
+    if evidence is None:
+        updated.clear_manual_evidence()
+    else:
+        updated.set_evidence(MANUAL, evidence)
+        updated.upload_revision += 1
+    if not workspace.checkpoint(updated, explicit=True):
+        if workspace.error is None:
+            workspace.error = "Could not save screenshot changes. The accepted evidence was kept."
+        return
+    st.session_state.pop(f"{key}_candidate", None)
+    st.session_state.pop(f"{key}_warning", None)
+    st.session_state.investigation = updated
+    st.rerun()
+
+
+def show_manual_uploads(case, workspace):
+    key = wizard_key(f"guided_evidence_upload_{case.revision}_{case.upload_revision}")
+    version = workspace.active.version if workspace.active is not None else None
+    st.file_uploader(
+        "Evidence screenshots", type=["png", "jpg", "jpeg", "webp"],
+        accept_multiple_files=True, key=key, on_change=capture_uploads, args=(case, key, version),
+    )
+    if notice := st.session_state.get(f"{key}_warning"):
+        st.warning(failure_text(notice))
+    if staged := st.session_state.get(f"{key}_candidate"):
+        staged_version, evidence_revision, token, evidence = staged
+        if (staged_version, evidence_revision) != (version, case.evidence_revision):
+            st.session_state.pop(f"{key}_candidate")
+            st.warning("This case changed after the screenshots were staged. Select the replacement files again.")
+        else:
+            st.caption("Confirm the exact files below. Files rejected by the browser may be missing from this list.")
+            for name in evidence.filenames:
+                st.text(name)
+            if st.button("Apply screenshot replacement", key=f"{key}_apply_{token}",
+                         disabled=evidence == case.evidence):
+                _commit_manual_evidence(case, workspace, key, evidence)
+    if case.evidence.images or MANUAL in case.evidence_errors:
+        if st.button("Clear uploaded screenshots", key="wizard_clear_uploads"):
+            _commit_manual_evidence(case, workspace, key)
 
 
 def show_evidence_assessment(result, provenance):
@@ -596,19 +644,7 @@ def show_evidence_investigation(case, workspace, attempt):
         if case.evidence_source == LAB:
             load_lab_evidence(case, warning_key)
         else:
-            key = wizard_key(f"guided_evidence_upload_{case.revision}_{case.upload_revision}")
-            st.file_uploader(
-                "Evidence screenshots", type=["png", "jpg", "jpeg", "webp"],
-                accept_multiple_files=True, key=key, on_change=capture_uploads, args=(case, key),
-            )
-            if notice := st.session_state.get(f"{key}_warning"):
-                st.warning(failure_text(notice))
-            if case.evidence.images or MANUAL in case.evidence_errors:
-                if st.button("Clear uploaded screenshots", key="wizard_clear_uploads"):
-                    st.session_state.pop(f"{key}_warning", None)
-                    case.clear_manual_evidence()
-                    if workspace.checkpoint(case):
-                        st.rerun()
+            show_manual_uploads(case, workspace)
         if warning_key in st.session_state:
             st.warning(failure_text(st.session_state[warning_key]))
         show_screenshots(case)

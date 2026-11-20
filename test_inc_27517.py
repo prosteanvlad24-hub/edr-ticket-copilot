@@ -190,6 +190,9 @@ class IncidentRegressionTest(unittest.TestCase):
                 self.skipTest("The installed Streamlit AppTest does not simulate uploads.")
             filename = "incident-screen.png"
             uploader.upload(filename, screenshot_with_comment(), "image/png").run()
+            self.assertTrue(gemini_confirmation(app, "evidence").disabled)
+            next(button for button in app.button if button.label == "Apply screenshot replacement").click().run()
+            case = app.session_state["investigation"]
             self.assertFalse(gemini_confirmation(app, "evidence").value)
             self.assertEqual(2, len(calls))
             submit_gemini(app, "evidence")
