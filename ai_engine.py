@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 from gemini_authorization import TICKET_DISCLOSURE, confirm_cli
+from presentation_safety import failure_text, record_failure
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 from google import genai
@@ -158,4 +159,9 @@ if __name__ == "__main__":
         "File MD5: d41d8cd98f00b204e9800998ecf8427e"
     )
 
-    print(analyze_ticket(sample_ticket, authorize=lambda: confirm_cli(TICKET_DISCLOSURE)))
+    try:
+        print(analyze_ticket(sample_ticket, authorize=lambda: confirm_cli(TICKET_DISCLOSURE)))
+    except Exception as exc:
+        raise SystemExit(failure_text(record_failure(
+            "sample-ai-analysis", exc, "Google Gemini analysis did not complete.", provider=True,
+        ))) from None

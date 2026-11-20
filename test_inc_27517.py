@@ -18,6 +18,7 @@ from streamlit.testing.v1 import AppTest
 from evidence_engine import analyze_evidence
 from evidence_inputs import screenshot_provenance
 from ioc_engine import extract_iocs
+from presentation_safety import AI_UNVERIFIED_NOTICE, SCREENSHOT_ATTRIBUTION_NOTICE
 from rules_engine import classify_ticket, ransomware_signals, reported_ticket_text
 from severity_engine import assess_severity, source_reported_severity
 from test_ticket_lab_integration import ASSESSMENT, VALIDATION, gemini_confirmation, submit_gemini
@@ -201,6 +202,9 @@ class IncidentRegressionTest(unittest.TestCase):
             self.assertFalse(config.tools)
             self.assertEqual("Insufficient Evidence", case.evidence_assessment["conclusion_status"])
             self.assertNotIn("Confirmed false positive.", case.evidence_assessment["conclusion"])
+            self.assertIn("recognized screenshot ID", case.evidence_assessment["conclusion"])
+            self.assertIn(AI_UNVERIFIED_NOTICE, [item.value for item in app.caption])
+            self.assertIn(SCREENSHOT_ATTRIBUTION_NOTICE, [item.value for item in app.caption])
             self.assertNotIn("recommended_priority", case.evidence_assessment)
             self.assertEqual("Critical", case.results["triage"]["severity"]["recommended_priority"])
             app.button(key="wizard_next").click().run()

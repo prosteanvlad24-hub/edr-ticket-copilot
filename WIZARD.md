@@ -19,7 +19,7 @@ Case data remains available while the Streamlit session is open. After returning
 | `investigation_state.py` | Stores case data separately from transient widgets and manages invalidation and evidence consent. |
 | `ui_styles.py`, `.streamlit/config.toml`, `static/fonts/` | Design tokens, native Streamlit theme, responsive layout, and locally bundled IBM Plex fonts. After editing tokens, run `python ui_styles.py` and restart Streamlit. The font license files are bundled with the assets. |
 | `assets/` | Exact source PNG for the chess knight emblem, scaled sidebar and favicon images, and the decorative SVG used by the CSS background. |
-| `report_engine_v2.py` | Labels Markdown as preliminary or evidence reviewed. JSON retains its original ticket, validation and evidence fields and adds status and initial-analysis fields. |
+| `report_engine_v2.py` | Separates report availability from analyst verification and renders untrusted Markdown fields as literal code. JSON retains the original analysis data and includes the verification status. |
 | `drive_streamlit.py` | Drives the current wizard and prompts the operator before each Google Gemini submission. |
 | `test_ticket_lab_integration.py` | Tests navigation, case transitions, both evidence sources, consent, exports, and provider failures with Gemini simulated. |
 

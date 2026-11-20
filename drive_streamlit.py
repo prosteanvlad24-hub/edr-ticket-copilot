@@ -30,6 +30,7 @@ import time
 from pathlib import Path
 
 from gemini_authorization import confirm_cli
+from presentation_safety import failure_text, record_failure
 
 try:
     from playwright.sync_api import expect, sync_playwright
@@ -189,8 +190,9 @@ def main():
                     page.screenshot(path=str(shot), full_page=True)
                 except Exception:
                     pass
-                out.write_text(f"[driver error] {type(ex).__name__}: {str(ex)[:300]}", encoding="utf-8")
-                print(f"FAILED {name}: {type(ex).__name__} (see {shot.name})")
+                failure = record_failure("browser-driver", ex, "The browser driver could not complete this step.")
+                out.write_text(failure_text(failure), encoding="utf-8")
+                print(f"FAILED {name}. {failure_text(failure)} See {shot.name}.")
             time.sleep(a.delay)
         browser.close()
     print(f"Done. Next: python ticket_lab.py report {run}")

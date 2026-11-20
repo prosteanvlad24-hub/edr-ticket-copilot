@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from gemini_authorization import TICKET_DISCLOSURE, confirm_cli
+from presentation_safety import failure_text, record_failure
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
@@ -110,4 +111,10 @@ if __name__ == "__main__":
         "for Endpoint. The device has been marked inactive in the Defender portal "
         "for 72 hours. No local agent health checks have been performed."
     )
-    print(json.dumps(validate_ticket(sample, authorize=lambda: confirm_cli(TICKET_DISCLOSURE)), indent=2, ensure_ascii=False))
+    try:
+        result = validate_ticket(sample, authorize=lambda: confirm_cli(TICKET_DISCLOSURE))
+    except Exception as exc:
+        raise SystemExit(failure_text(record_failure(
+            "sample-ticket-validation", exc, "Google Gemini validation did not complete.", provider=True,
+        ))) from None
+    print(json.dumps(result, indent=2, ensure_ascii=False))

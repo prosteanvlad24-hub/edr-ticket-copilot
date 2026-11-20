@@ -3,6 +3,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 from investigation_state import LAB
+from presentation_safety import (
+    AI_EVIDENCE_STATUS_LABEL, AI_UNVERIFIED_NOTICE, SCREENSHOT_ATTRIBUTION_NOTICE,
+    markdown_literal as _s, markdown_literal_block,
+)
 
 
 def build_report_exports(case, *, audit=None):
@@ -18,7 +22,8 @@ def build_report_exports(case, *, audit=None):
         synthetic_evidence=bool(evidence and case.evidence_source == LAB), evidence_provenance=provenance,
     )
     payload = {
-        "report_status": "evidence_reviewed" if evidence else "preliminary",
+        "report_status": "ai_evidence_assessment_unverified" if evidence else "preliminary",
+        "analyst_verification_status": "not_recorded",
         "ticket": case.ticket.description,
         "validation": validation,
         "evidence_assessment": evidence,
@@ -34,18 +39,14 @@ def build_report_exports(case, *, audit=None):
         quality = audit["ai_assessment_quality"]
         markdown += (
             "\n## Case audit metadata\n\n"
-            f"- Case ID: {audit['case_id']}\n- Case version: {audit['version']}\n"
-            f"- Issued (UTC): {audit['issued_at']}\n- Lifecycle status: {audit['lifecycle_status']}\n"
-            f"- Incident verdict: {audit['incident_verdict']}\n"
+            f"- Case ID: {_s(audit['case_id'])}\n- Case version: {_s(audit['version'])}\n"
+            f"- Issued (UTC): {_s(audit['issued_at'])}\n- Lifecycle status: {_s(audit['lifecycle_status'])}\n"
+            f"- Recorded incident verdict: {_s(audit['incident_verdict'])}\n"
             "\n### Recorded AI assessment quality\n\n"
             + _bullet([f"{row['assessment_id']} (version {row['assessment_version']}): {row['quality']}" for row in quality],
                       "No saved AI assessment quality records.")
         )
     return markdown, payload
-
-
-def _s(value: Any) -> str:
-    return str(value if value is not None else "Not available").replace("\x00", "")
 
 
 def _bullet(items: Any, empty: str = "Not available") -> str:
@@ -66,14 +67,15 @@ def generate_investigation_report(
     evidence_provenance: list[dict] | tuple[dict, ...] = (),
 ) -> str:
     """Build a consolidated report from already completed analyses only."""
-    status = "Evidence reviewed" if evidence_assessment else "Preliminary"
+    status = AI_EVIDENCE_STATUS_LABEL if evidence_assessment else "Preliminary"
     out = [
         "# EDR Ticket Copilot — Investigation Report v2",
         f"Generated (UTC): {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}",
-        f"**Report status:** {status}. Analyst verification required.",
+        f"**Report status:** {status}.",
+        "**Analyst verification:** Not recorded. Treat AI output as unverified and review claims independently.",
         "**Scope:** Only the supplied ticket and previously submitted evidence were considered. No live environment access.",
         "\n## 1. Original Ticket\n",
-        _s(description),
+        markdown_literal_block(description),
     ]
     if rule_result:
         sev = rule_result.get("severity") or {}
@@ -103,12 +105,14 @@ def generate_investigation_report(
         if partials:
             out += ["\n### Partial hashes\n", "Incomplete digests require the full value for matching."]
             for item in partials:
-                out.append(f"- {_s(item.get('algorithm') or 'Unknown algorithm')} `{_s(item.get('value'))}`")
+                out.append(f"- {_s(item.get('algorithm') or 'Unknown algorithm')} {_s(item.get('value'))}")
     else:
         out += ["\n## 3. Extracted Indicators\n", "Not run for this ticket."]
-    out += ["\n## 4. Gemini Incident Analysis\n", ai_analysis or "Not run for this ticket."]
+    out += ["\n## 4. Gemini Incident Analysis\n"]
+    out += [AI_UNVERIFIED_NOTICE, markdown_literal_block(ai_analysis)] if ai_analysis else ["Not run for this ticket."]
     if validation:
         out += ["\n## 5. Ticket Intent Validation\n",
+                AI_UNVERIFIED_NOTICE,
                 f"- Product: {_s(validation.get('product'))}",
                 f"- Request quality: **{_s(validation.get('assessment'))}**",
                 f"- Reported issue: {_s(validation.get('reported_issue'))}",
@@ -120,39 +124,41 @@ def generate_investigation_report(
             out.append(f"- **{_s(item.get('source'))}** — {_s(item.get('what_to_capture'))}. Reason: {_s(item.get('why'))}")
         if not validation.get("evidence_requests"):
             out.append("- None requested")
-        out += ["\n### Clarification message to requester\n", _s(validation.get("clarification_message"))]
+        out += ["\n### Clarification message to requester\n", markdown_literal_block(validation.get("clarification_message"))]
     else:
         out += ["\n## 5. Ticket Intent Validation\n", "Not run for this ticket."]
     if evidence_assessment:
         e = evidence_assessment
         source = "Synthetic Ticket Lab screenshots" if synthetic_evidence else "Analyst-uploaded screenshots"
         out += ["\n## 6. Screenshot Evidence Reassessment\n",
+                AI_UNVERIFIED_NOTICE,
+                SCREENSHOT_ATTRIBUTION_NOTICE,
                 f"**Evidence provenance:** {source}; no live console access. Image content and vendor UI labels may be synthetic or inaccurate.",
-                f"- Conclusion status: **{_s(e.get('conclusion_status'))}**",
-                f"- Original requested action: **{_s(e.get('requested_action_assessment'))}**",
-                f"- Model-assessed conclusion: {_s(e.get('conclusion'))}"]
+                f"- AI conclusion status (unverified): {_s(e.get('conclusion_status'))}",
+                f"- AI assessment of requested action: {_s(e.get('requested_action_assessment'))}",
+                f"- AI-generated conclusion: {_s(e.get('conclusion'))}"]
         if evidence_provenance:
             out.append("\n### Screenshot register\n")
             for image in evidence_provenance:
-                name = " ".join(_s(image.get("filename") or image.get("label")).splitlines()).replace("`", "'")
+                name = _s(image.get("filename") or image.get("label"))
                 out.append(
-                    f"- **{_s(image['id'])}** · {_s(image['source'])} · `{name}` · {_s(image['mime_type'])}"
-                    f" · Submitted image SHA256 `{_s(image['sha256'])}`"
+                    f"- **{_s(image['id'])}** · {_s(image['source'])} · {name} · {_s(image['mime_type'])}"
+                    f" · Submitted image SHA256 {_s(image['sha256'])}"
                 )
         for kind, heading in (
-            ("screenshot", "Screenshot observations"),
-            ("ticket", "Ticket-reported observations"),
+            ("screenshot", "AI observations attributed to screenshots"),
+            ("ticket", "AI observations attributed to the ticket"),
             ("unattributed", "Unattributed model claims"),
         ):
             group = [item for item in e.get("observations", []) if item.get("source_kind", "unattributed") == kind]
             if group:
                 out.append(f"\n### {heading}\n")
             for obs in group:
-                confidence = f" ({_s(obs.get('confidence'))} confidence)" if kind != "unattributed" else ""
+                confidence = f" ({_s(obs.get('confidence'))} model confidence)" if kind != "unattributed" else ""
                 out.append(f"- **{_s(obs.get('source'))}**{confidence}: {_s(obs.get('observation'))}")
-        out += ["\n### Hypotheses — not confirmed facts\n"]
+        out += ["\n### AI hypotheses to verify\n"]
         for h in e.get("hypotheses", []):
-            out.append(f"- **{_s(h.get('hypothesis'))}**\n  - Supporting evidence: {_s(h.get('supporting_evidence'))}\n  - Missing evidence: {_s(h.get('missing_evidence'))}")
+            out.append(f"- **{_s(h.get('hypothesis'))}**\n  - Model-cited support: {_s(h.get('supporting_evidence'))}\n  - Missing evidence: {_s(h.get('missing_evidence'))}")
         if not e.get("hypotheses"):
             out.append("- None")
         out += ["\n### Recommended next steps\n", _bullet(e.get("recommended_next_steps")),
@@ -161,7 +167,7 @@ def generate_investigation_report(
             out.append(f"- **{_s(item.get('source'))}** — {_s(item.get('what_to_capture'))}. Reason: {_s(item.get('why'))}")
         if not e.get("next_evidence_requests"):
             out.append("- None")
-        out += ["\n### Updated clarification message\n", _s(e.get("clarification_message"))]
+        out += ["\n### Updated clarification message\n", markdown_literal_block(e.get("clarification_message"))]
     else:
         out += ["\n## 6. Screenshot Evidence Reassessment\n", "Not run for this ticket."]
     out += ["\n## 7. Analyst Verification Checklist\n",

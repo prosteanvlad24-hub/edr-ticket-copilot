@@ -108,21 +108,21 @@ def _validate(data: Any) -> dict:
 
 
 def _attribute_observations(data: dict, screenshot_ids: tuple[str, ...]) -> dict:
-    """Resolve citation labels against the application-assigned evidence IDs."""
-    image_observed = False
+    """Resolve citation labels by ID. Attribution alone establishes no factual support."""
+    has_recognized_citation = False
     for item in data["observations"]:
         source = item["source"].strip()
         identifier = source.upper().removeprefix("SCREENSHOT ").strip()
         if identifier in screenshot_ids:
             item.update(source=f"Screenshot {identifier}", source_kind="screenshot", evidence_id=identifier)
-            image_observed = True
+            has_recognized_citation = True
         elif source.lower() in {"ticket", "ticket description", "ticket reported"}:
             item.update(source="Ticket reported", source_kind="ticket", evidence_id=None)
         else:
             item.update(source="Unattributed model claim", source_kind="unattributed", evidence_id=None)
-    if data["conclusion_status"] == "Confirmed" and not image_observed:
+    if data["conclusion_status"] == "Confirmed" and not has_recognized_citation:
         data["conclusion_status"] = "Insufficient Evidence"
-        data["conclusion"] = "The model did not cite an identified screenshot that supports confirmation. Analyst review is required."
+        data["conclusion"] = "The model did not cite any recognized screenshot ID. Analyst verification is required."
     return data
 
 

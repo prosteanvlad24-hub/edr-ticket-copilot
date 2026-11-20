@@ -222,7 +222,8 @@ class TicketLabIntegrationTest(unittest.TestCase):
             exports = {call.kwargs["key"]: call.kwargs["data"] for call in downloads.call_args_list}
             self.assertIn("Synthetic Ticket Lab screenshots", exports["download_full_report_v2"])
             reviewed = json.loads(exports["guided_download"])
-            self.assertEqual("evidence_reviewed", reviewed["report_status"])
+            self.assertEqual("ai_evidence_assessment_unverified", reviewed["report_status"])
+            self.assertEqual("not_recorded", reviewed["analyst_verification_status"])
             self.assertEqual(ASSESSMENT, reviewed["evidence_assessment"])
             self.assertNotIn(PRIVATE_MARKER, repr(exports))
             self.navigate(app, "Evidence Investigation", "wizard_back")

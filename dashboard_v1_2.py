@@ -13,6 +13,9 @@ from evidence_inputs import MAX_IMAGE_BYTES, MAX_IMAGES, prepare_images
 from gemini_authorization import EVIDENCE_DISCLOSURE, TICKET_DISCLOSURE
 from investigation_state import LAB, MANUAL, Evidence, Investigation, Ticket
 from ioc_engine import extract_iocs
+from presentation_safety import (
+    AI_EVIDENCE_STATUS_LABEL, AI_UNVERIFIED_NOTICE, SCREENSHOT_ATTRIBUTION_NOTICE, failure_text, record_failure,
+)
 from report_engine_v2 import build_report_exports
 from rules_engine import classify_ticket, get_troubleshooting_steps, ransomware_signals, reported_ticket_text
 from severity_engine import assess_severity, source_reported_severity
@@ -49,12 +52,12 @@ def show_sidebar_status(case, workspace):
         st.markdown("#### Active Case")
         if current:
             st.text(current.title)
-        st.caption(f"Incident ID · {ticket.lab_id}" if ticket.lab_id else "Manual ticket")
+        st.text(f"Incident ID · {ticket.lab_id}" if ticket.lab_id else "Manual ticket")
         with st.container(horizontal=True):
             if current:
                 st.badge(current.status.value.replace("_", " ").title(), color="blue")
             st.badge(save_label, color=save_color)
-        st.caption(f"{ticket.criticality.title()} asset criticality")
+        st.text(f"{ticket.criticality.title()} asset criticality")
     with st.container(key="edr_system_status", border=True):
         st.markdown("#### System Status")
         st.badge("Local Analysis · Available", color="green")
@@ -75,9 +78,9 @@ def show_sample_library():
         for item in samples:
             if not isinstance(item, dict):
                 continue
-            st.markdown(f"**{item.get('id', 'Sample ticket')} · {item.get('product', 'Unknown product')}**")
-            st.write(item.get("description", ""))
-            st.caption(f"Category · {item.get('category', 'Unknown')}")
+            st.text(f"{item.get('id', 'Sample ticket')} · {item.get('product', 'Unknown product')}")
+            st.text(item.get("description", ""))
+            st.text(f"Category · {item.get('category', 'Unknown')}")
 
 
 def show_manual_entry(case):
@@ -126,7 +129,7 @@ def show_lab_entry(case, workspace):
                     run = generate_run(RUNS, count=int(count), seed=int(seed), with_evidence=True)
                 st.session_state[run_key] = run.name
             except (ImportError, OSError, TypeError, ValueError) as exc:
-                st.error(f"Ticket generation failed. {exc}")
+                st.error(failure_text(record_failure("ticket-lab-generate", exc, "Ticket generation failed.")))
 
     runs = {run.name: run for run in list_runs(RUNS)}
     if not runs:
@@ -162,7 +165,7 @@ def show_lab_entry(case, workspace):
                 show_context(case.ticket)
                 return True
         except (ImportError, OSError, ValueError) as exc:
-            st.error(f"The synthetic ticket could not be opened. {exc}")
+            st.error(failure_text(record_failure("ticket-lab-open", exc, "The synthetic ticket could not be opened.")))
     return False
 
 
@@ -221,7 +224,7 @@ def run_modules(case, modules):
             case.results[module] = LOCAL_ANALYZERS[module](case.ticket)
             case.errors.pop(module, None)
         except Exception as exc:
-            case.errors[module] = str(exc)
+            case.errors[module] = record_failure(module, exc, "Local analysis could not complete.")
 
 
 def show_module_status(case):
@@ -238,7 +241,7 @@ def show_module_status(case):
     for key, error in case.errors.items():
         st.warning(f"{MODULES[key]} failed. Other modules can still run.")
         with st.expander(f"{MODULES[key]} error details"):
-            st.code(error)
+            st.text(failure_text(error))
 
 
 def _capture_gemini_attempt(scope, confirmation_key):
@@ -272,7 +275,7 @@ def run_gemini_module(case, workspace, module, analyzer):
         with st.spinner(f"Running {MODULES[module]}…"):
             result = analyzer(case.ticket, authorize=workspace.check_gemini_version)
     except Exception as exc:
-        case.errors[module] = str(exc)
+        case.errors[module] = record_failure(module, exc, "Check the Google Gemini configuration or authorize a retry.", provider=True)
         return
 
     def apply_result(investigation):
@@ -318,15 +321,15 @@ def show_initial_analysis(case, workspace, attempt):
 
 def show_lines(items):
     for item in items:
-        st.write("• " + str(item))
+        st.text("• " + str(item))
 
 
 def show_evidence_requests(requests):
     for item in requests:
         with st.container(border=True):
-            st.write(item.get("source") or "Evidence source")
-            st.write(item.get("what_to_capture", ""))
-            st.caption(item.get("why", ""))
+            st.text(item.get("source") or "Evidence source")
+            st.text(item.get("what_to_capture", ""))
+            st.text(item.get("why", ""))
 
 
 def show_severity(severity):
@@ -340,8 +343,8 @@ def show_severity(severity):
         ("Heuristic score", severity.get("score", "Unknown"), "default"),
     ])
     if severity.get("major_disagreement"):
-        st.warning(f"Major severity disagreement. The source reports {source} and the heuristic is {heuristic}.")
-    st.caption(severity.get("priority_rationale", "Investigation priority requires analyst confirmation."))
+        st.warning("The source-reported severity and local heuristic differ materially.")
+    st.text(severity.get("priority_rationale", "Investigation priority requires analyst confirmation."))
 
 
 def show_initial_findings(case):
@@ -354,7 +357,7 @@ def show_initial_findings(case):
     if triage:
         severity = triage["severity"]
         show_severity(severity)
-        st.caption("Classification · " + triage["category"].replace("_", " ").title())
+        st.text("Classification · " + triage["category"].replace("_", " ").title())
         with st.expander("Severity rationale and troubleshooting"):
             show_lines(severity.get("reasons", []))
             show_lines(triage.get("steps", []))
@@ -362,14 +365,15 @@ def show_initial_findings(case):
     validation = case.prior_validation
     if validation:
         with st.container(border=True, key="analysis-detail"):
-            st.subheader("Ticket assessment")
+            st.subheader("AI ticket validation (unverified)")
+            st.caption(AI_UNVERIFIED_NOTICE)
             render_metrics(st, [("Product", validation.get("product", "Unknown"), "default"),
                                 ("Request quality", validation.get("assessment", "Unknown"), "accent")])
             st.markdown("**Reported issue**")
-            st.write(validation.get("reported_issue", ""))
+            st.text(validation.get("reported_issue", ""))
             st.markdown("**Requested action**")
-            st.write(validation.get("requested_action", ""))
-            st.write(validation.get("reasoning", ""))
+            st.text(validation.get("requested_action", ""))
+            st.text(validation.get("reasoning", ""))
             st.markdown("**Missing information**")
             missing = validation.get("missing_information")
             if missing:
@@ -383,7 +387,7 @@ def show_initial_findings(case):
             else:
                 st.caption("No additional evidence requested.")
             with st.expander("Suggested clarification to requester"):
-                st.write(validation.get("clarification_message", ""))
+                st.text(validation.get("clarification_message", ""))
 
     if case.results.get("iocs"):
         indicators = case.results["iocs"]["indicators"]
@@ -391,7 +395,7 @@ def show_initial_findings(case):
         st.subheader("Detected indicators")
         st.caption("Candidate indicators require verification.")
         groups = [("IPv4", indicators.get("ipv4", [])), ("Domains", indicators.get("domains", [])),
-                  ("URLs", indicators.get("urls", [])), *[(kind, values) for kind, values in hashes.items()]]
+                  ("URLs", indicators.get("urls", [])), *[(kind, hashes.get(kind, [])) for kind in ("MD5", "SHA1", "SHA256")]]
         for name, values in groups:
             with st.expander(f"{name} · {len(values)}"):
                 if values:
@@ -408,8 +412,9 @@ def show_initial_findings(case):
 
     if case.results.get("ai"):
         with st.container(border=True, key="initial-ai-findings"):
-            st.subheader("Gemini initial findings")
-            st.markdown(case.results["ai"])
+            st.subheader("Gemini initial findings (unverified)")
+            st.caption(AI_UNVERIFIED_NOTICE)
+            st.text(case.results["ai"])
 
 
 def load_lab_evidence(case):
@@ -420,7 +425,7 @@ def load_lab_evidence(case):
         if case.evidence.images:
             st.caption("Showing saved screenshots. The original Ticket Lab files are unavailable.")
         else:
-            case.set_evidence(LAB, Evidence(), str(exc))
+            case.set_evidence(LAB, Evidence(), record_failure("ticket-lab-evidence", exc, "Ticket Lab screenshots could not be loaded."))
         return
     try:
         if case.evidence.images and not set(case.lab_selection or ()).issubset(options):
@@ -440,7 +445,7 @@ def load_lab_evidence(case):
             labels = tuple(f"Screenshot {options.index(name) + 1}" for name in selected)
             case.set_evidence(LAB, Evidence(labels, loaded.images, selected))
     except (ImportError, OSError, ValueError) as exc:
-        case.set_evidence(LAB, Evidence(), str(exc))
+        case.set_evidence(LAB, Evidence(), record_failure("ticket-lab-evidence", exc, "Ticket Lab screenshots could not be loaded."))
 
 
 def capture_uploads(case, key):
@@ -454,28 +459,32 @@ def capture_uploads(case, key):
         names = tuple(item.name.replace("\\", "/").rsplit("/", 1)[-1] for item in files)
         case.set_evidence(MANUAL, Evidence(names, tuple(images), names))
     except (ImportError, ValueError) as exc:
-        case.set_evidence(MANUAL, Evidence(), str(exc))
+        case.set_evidence(MANUAL, Evidence(), record_failure(
+            "prepare-screenshots", exc, "Screenshots could not be loaded. Check the format, file size, and attachment count.",
+        ))
 
 
 def show_evidence_assessment(result, provenance):
     with st.container(border=True, key="evidence-assessment"):
         st.subheader("Evidence reassessment")
+        st.caption(AI_UNVERIFIED_NOTICE)
+        st.caption(SCREENSHOT_ATTRIBUTION_NOTICE)
         render_metrics(st, [
-            ("Conclusion status", result.get("conclusion_status", "Unknown"), "accent"),
-            ("Requested action", result.get("requested_action_assessment", "Unknown"), "default"),
+            ("AI conclusion status (unverified)", result.get("conclusion_status", "Unknown"), "warning"),
+            ("AI assessment of requested action", result.get("requested_action_assessment", "Unknown"), "default"),
         ])
-        st.markdown("**Analyst review of the model assessment**")
-        st.write(result.get("conclusion", ""))
+        st.markdown("**AI-generated conclusion**")
+        st.text(result.get("conclusion", ""))
         if provenance:
             with st.expander("Screenshot provenance"):
                 for screenshot in provenance:
-                    st.caption(f"{screenshot['id']} · {screenshot['source']} · {screenshot['mime_type']}")
+                    st.text(f"{screenshot['id']} · {screenshot['source']} · {screenshot['mime_type']}")
                     st.text(screenshot["filename"] or screenshot["label"])
                     st.code(screenshot["sha256"], language=None)
         observations = result.get("observations", [])
         for kind, heading in (
-            ("screenshot", "Screenshot observations"),
-            ("ticket", "Ticket-reported observations"),
+            ("screenshot", "AI observations attributed to screenshots"),
+            ("ticket", "AI observations attributed to the ticket"),
             ("unattributed", "Unattributed model claims"),
         ):
             group = [item for item in observations if item.get("source_kind", "unattributed") == kind]
@@ -483,15 +492,16 @@ def show_evidence_assessment(result, provenance):
                 st.markdown(f"**{heading}**")
             for item in group:
                 if kind != "unattributed":
-                    st.caption(f"{item.get('source', 'Evidence')} · {item.get('confidence', 'Unknown')} confidence")
-                st.write(item.get("observation", ""))
+                    st.text(f"{item.get('source', 'Evidence')} · {item.get('confidence', 'Unknown')} model confidence")
+                st.text(item.get("observation", ""))
         hypotheses = result.get("hypotheses", [])
         if hypotheses:
             st.markdown("**Hypotheses to validate**")
-        for item in hypotheses:
-            with st.expander(item.get("hypothesis", "Hypothesis")):
-                st.write("Supporting evidence", item.get("supporting_evidence", ""))
-                st.write("Missing evidence", item.get("missing_evidence", ""))
+        for index, item in enumerate(hypotheses, start=1):
+            with st.expander(f"AI hypothesis {index}"):
+                st.text(item.get("hypothesis", ""))
+                st.text(f"Model-cited support · {item.get('supporting_evidence', '')}")
+                st.text(f"Missing evidence · {item.get('missing_evidence', '')}")
         if result.get("recommended_next_steps"):
             st.markdown("**Recommended next steps**")
             show_lines(result["recommended_next_steps"])
@@ -500,16 +510,16 @@ def show_evidence_assessment(result, provenance):
             show_evidence_requests(result["next_evidence_requests"])
         if result.get("clarification_message"):
             with st.expander("Updated clarification message"):
-                st.write(result["clarification_message"])
+                st.text(result["clarification_message"])
 
 
 def show_screenshots(case):
     if case.evidence_source in case.evidence_errors:
-        st.warning(case.evidence_errors[case.evidence_source])
+        st.warning(failure_text(case.evidence_errors[case.evidence_source]))
     if case.evidence.images:
         st.markdown("**Review selected screenshots**")
         for screenshot, (_, data) in zip(case.evidence_provenance, case.evidence.images):
-            st.caption(f"{screenshot['id']} · {screenshot['source']}")
+            st.text(f"{screenshot['id']} · {screenshot['source']}")
             st.text(screenshot["filename"] or screenshot["label"])
             st.image(data, width=670)
 
@@ -553,7 +563,9 @@ def show_evidence_investigation(case, workspace, attempt):
                     authorize=workspace.check_gemini_version, evidence_source=case.evidence_source,
                 )
         except Exception as exc:
-            case.reassessment_error = str(exc)
+            case.reassessment_error = record_failure(
+                "evidence-reassessment", exc, "Check the Google Gemini configuration or authorize a retry.", provider=True,
+            )
         else:
             def apply_result(investigation):
                 investigation.reviewed_fingerprint = fingerprint
@@ -565,7 +577,7 @@ def show_evidence_investigation(case, workspace, attempt):
     if case.reassessment_error:
         st.error("Evidence reassessment failed. You can retry or continue to the report.")
         with st.expander("Reassessment error details"):
-            st.code(case.reassessment_error)
+            st.text(failure_text(case.reassessment_error))
     if case.evidence_assessment:
         show_evidence_assessment(case.evidence_assessment, case.evidence_provenance)
 
@@ -573,9 +585,9 @@ def show_evidence_investigation(case, workspace, attempt):
 def show_final_report(case):
     evidence = case.evidence_assessment
     provenance = case.evidence_provenance if evidence else []
-    status = "Evidence reviewed" if evidence else "Preliminary"
+    status = AI_EVIDENCE_STATUS_LABEL if evidence else "Preliminary"
     render_metrics(st, [
-        ("Report status", status, "success" if evidence else "warning"),
+        ("Report status", status, "warning"),
         ("Incident", case.ticket.lab_id or "Manual ticket", "default"),
         ("Initial modules completed", f"{len(case.results)} / {len(MODULES)}", "accent"),
     ])
@@ -589,14 +601,15 @@ def show_final_report(case):
     if triage or validation or analysis:
         st.subheader("Initial investigation summary")
         if triage:
-            st.write("Classification", triage["category"].replace("_", " ").title())
+            st.text(f"Classification · {triage['category'].replace('_', ' ').title()}")
             show_severity(triage["severity"])
         if validation:
-            st.write(validation.get("reported_issue", ""))
+            st.caption("AI ticket validation (unverified)")
+            st.text(validation.get("reported_issue", ""))
         if analysis:
-            with st.expander("Initial Gemini findings"):
+            with st.expander("Initial Gemini findings (unverified)"):
                 with st.container(key="report-copy"):
-                    st.markdown(analysis)
+                    st.text(analysis)
         if not evidence and triage and triage["steps"]:
             st.markdown("**Recommended next steps**")
             show_lines(triage["steps"])
@@ -614,7 +627,7 @@ def show_final_report(case):
         )
     with st.expander("Full report preview"):
         with st.container(key="full-report-copy"):
-            st.markdown(markdown)
+            st.code(markdown, language=None)
 
 
 def navigate(case, entry_ready, workspace):

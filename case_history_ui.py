@@ -9,6 +9,9 @@ import streamlit as st
 
 from case_repository import CaseConflictError
 from evidence_inputs import prepare_images, screenshot_provenance
+from presentation_safety import (
+    AI_EVIDENCE_STATUS_LABEL, AI_UNVERIFIED_NOTICE, SCREENSHOT_ATTRIBUTION_NOTICE, failure_text, record_failure,
+)
 from report_engine_v2 import build_report_exports
 
 
@@ -21,7 +24,9 @@ def _post_note(repository, case_id, version, author_key, body_key, correction_ke
     except CaseConflictError:
         _notice(case_id, "error", "The saved version changed. Review the latest version before adding the note.")
     except ValueError as exc:
-        _notice(case_id, "error", str(exc))
+        _notice(case_id, "error", failure_text(record_failure(
+            "analyst-note", exc, "Check the author, note content, and selected correction before trying again.",
+        )))
     except (OSError, sqlite3.Error, KeyError):
         _notice(case_id, "error", "Could not store the analyst note.")
     else:
@@ -41,8 +46,10 @@ def _issue_report(repository, case_id, version):
             "ai_assessment_quality": repository.assessment_quality(case_id, version),
         }
         markdown, payload = build_report_exports(saved.investigation, audit=audit)
+        # The existing SQLite enum is a storage key. New export bytes carry the public trust status.
+        storage_status = "evidence_reviewed" if payload["evidence_assessment"] else "preliminary"
         report = repository.issue_report(
-            case_id, version, payload["report_status"], markdown.encode("utf-8"),
+            case_id, version, storage_status, markdown.encode("utf-8"),
             json.dumps(payload, indent=2, ensure_ascii=False).encode("utf-8"), issued_at=issued_at,
         )
     except CaseConflictError:
@@ -65,7 +72,7 @@ def _render_notes(notes):
         st.text(f"{note.author_label} · Version {note.version} · {note.created_at}")
         st.text(note.body)
         if note.supersedes_note_id:
-            st.caption(f"Correction to note {note.supersedes_note_id}")
+            st.text(f"Correction to note {note.supersedes_note_id}")
 
 
 def _render_note_form(repository, case_id, version, notes):
@@ -114,7 +121,7 @@ def _render_snapshot(repository, case_id, version, notes):
         saved = repository.load(case_id, version=version)
         quality = repository.assessment_quality(case_id, version)
     except (OSError, sqlite3.Error, ValueError, KeyError):
-        st.error("This snapshot or its evidence could not be verified.")
+        st.error("This snapshot or its stored evidence could not pass an integrity check.")
         return
     case = saved.investigation
     st.markdown("#### Read-only snapshot")
@@ -132,13 +139,20 @@ def _render_snapshot(repository, case_id, version, notes):
     if case.results or case.evidence_assessment:
         with st.expander("Stored analysis outputs"):
             for module, value in case.results.items():
-                heading = {"triage": "Local triage", "iocs": "Local IOC extraction", "validation": "AI ticket validation",
-                           "ai": "AI initial findings"}.get(module, "Analysis output")
+                heading = {"triage": "Local triage", "iocs": "Local IOC extraction", "validation": "AI ticket validation (unverified)",
+                           "ai": "AI initial findings (unverified)"}.get(module, "Analysis output")
                 st.markdown(f"**{heading}**")
-                st.text(value) if isinstance(value, str) else st.json(value, expanded=False)
+                if module in {"validation", "ai"}:
+                    st.caption(AI_UNVERIFIED_NOTICE)
+                if isinstance(value, str):
+                    st.text(value)
+                else:
+                    st.code(json.dumps(value, indent=2, ensure_ascii=False), language=None)
             if case.evidence_assessment:
-                st.markdown("**AI evidence reassessment**")
-                st.json(case.evidence_assessment, expanded=False)
+                st.markdown("**AI evidence reassessment (unverified)**")
+                st.caption(AI_UNVERIFIED_NOTICE)
+                st.caption(SCREENSHOT_ATTRIBUTION_NOTICE)
+                st.code(json.dumps(case.evidence_assessment, indent=2, ensure_ascii=False), language=None)
     st.markdown("**AI assessment quality**")
     if quality:
         st.dataframe(quality, hide_index=True)
@@ -152,7 +166,8 @@ def _render_snapshot(repository, case_id, version, notes):
 def _render_reports(repository, case_id, version, reports):
     st.subheader("Issued reports")
     if reports:
-        titles = {report.id: f"Version {report.version} · {report.report_status.replace('_', ' ')} · "
+        statuses = {"preliminary": "Preliminary", "evidence_reviewed": AI_EVIDENCE_STATUS_LABEL}
+        titles = {report.id: f"Version {report.version} · {statuses[report.report_status]} · "
                   f"{report.issued_at} · {report.id[:8]}" for report in reports}
         report_id = st.selectbox("Issued report", list(titles), index=None,
                                  key=f"audit_report_{case_id}", format_func=titles.__getitem__)
@@ -163,6 +178,7 @@ def _render_reports(repository, case_id, version, reports):
                 st.error("Could not retrieve the issued report.")
             else:
                 file_stem = f"EDR_Report_v{report.metadata.version}_{report_id}"
+                st.caption("Downloads preserve the issued bytes. Older reports may contain legacy wording and active Markdown. Use the plain-text preview for inspection.")
                 with st.container(horizontal=True):
                     st.download_button("Download issued Markdown", report.markdown_bytes, f"{file_stem}.md",
                                        "text/markdown", key=f"audit_md_{report_id}", on_click="ignore")

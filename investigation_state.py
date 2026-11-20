@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 
 from evidence_inputs import evidence_fingerprint, public_validation, screenshot_provenance
+from presentation_safety import FailureNotice
 
 MANUAL = "Manual upload"
 LAB = "Ticket Lab"
@@ -43,17 +44,17 @@ class Investigation:
     manual_draft: Ticket = DEFAULT_TICKET
     entry_source: str = "Manual entry"
     results: dict = field(default_factory=dict)
-    errors: dict[str, str] = field(default_factory=dict)
+    errors: dict[str, FailureNotice] = field(default_factory=dict)
     evidence_source: str = MANUAL
     evidence_by_source: dict[str, Evidence] = field(default_factory=dict)
-    evidence_errors: dict[str, str] = field(default_factory=dict)
+    evidence_errors: dict[str, FailureNotice] = field(default_factory=dict)
     lab_selection: tuple[str, ...] | None = None
     upload_revision: int = 0
     evidence_revision: int = 0
     consent: str | None = None
     reviewed_fingerprint: str | None = None
     reviewed_evidence: dict | None = None
-    reassessment_error: str | None = None
+    reassessment_error: FailureNotice | None = None
 
     def commit_ticket(self, ticket: Ticket) -> None:
         if self.ticket.identity != ticket.identity:
@@ -80,7 +81,7 @@ class Investigation:
             self.evidence_source = source
             self.invalidate_reassessment()
 
-    def set_evidence(self, source: str, evidence: Evidence, error: str | None = None) -> None:
+    def set_evidence(self, source: str, evidence: Evidence, error: FailureNotice | None = None) -> None:
         previous = self.evidence_by_source.get(source, Evidence())
         if source == self.evidence_source and previous != evidence:
             self.invalidate_reassessment()
