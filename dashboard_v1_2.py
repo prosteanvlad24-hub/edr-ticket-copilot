@@ -83,6 +83,19 @@ def show_sample_library():
             st.text(f"Category · {item.get('category', 'Unknown')}")
 
 
+def _capture_manual_draft(case):
+    draft = case.manual_draft
+    description = st.session_state.get(wizard_key("ticket_description"), draft.description)
+    criticality = st.session_state.get(wizard_key("asset_criticality"))
+    hours = st.session_state.get(wizard_key("offline_hours"))
+    endpoints = st.session_state.get(wizard_key("affected_endpoints"))
+    case.manual_draft = Ticket(
+        (description or "").strip(), criticality or draft.criticality,
+        draft.offline_hours if hours is None else hours,
+        draft.affected_endpoints if endpoints is None else endpoints,
+    )
+
+
 def show_manual_entry(case):
     draft = case.manual_draft
     fields = {
@@ -95,21 +108,20 @@ def show_manual_entry(case):
         st.session_state.setdefault(wizard_key(key), value)
     with st.container(border=True, key="ticket-editor"):
         st.subheader("Incident description")
-        description = st.text_area(
+        st.text_area(
             "Incident description", value=None, key=wizard_key("ticket_description"), height=200,
             label_visibility="collapsed",
             placeholder="Paste an EDR alert, incident note, or support ticket.",
-        ) or ""
+            on_change=_capture_manual_draft, args=(case,),
+        )
         st.markdown("**Incident context**")
         left, center, right = st.columns(3)
-        criticality = left.selectbox("Asset criticality", ["low", "medium", "high", "critical"], index=None, key=wizard_key("asset_criticality"))
-        hours = center.number_input("Hours since agent communication", min_value=0, value=None, key=wizard_key("offline_hours"))
-        endpoints = right.number_input("Affected endpoints", min_value=1, value=None, key=wizard_key("affected_endpoints"))
-    case.manual_draft = Ticket(
-        description.strip(), criticality or draft.criticality,
-        draft.offline_hours if hours is None else hours,
-        draft.affected_endpoints if endpoints is None else endpoints,
-    )
+        left.selectbox("Asset criticality", ["low", "medium", "high", "critical"], index=None,
+                       key=wizard_key("asset_criticality"), on_change=_capture_manual_draft, args=(case,))
+        center.number_input("Hours since agent communication", min_value=0, value=None,
+                            key=wizard_key("offline_hours"), on_change=_capture_manual_draft, args=(case,))
+        right.number_input("Affected endpoints", min_value=1, value=None, key=wizard_key("affected_endpoints"),
+                           on_change=_capture_manual_draft, args=(case,))
     show_sample_library()
     return bool(case.manual_draft.description)
 
@@ -417,7 +429,49 @@ def show_initial_findings(case):
             st.text(case.results["ai"])
 
 
-def load_lab_evidence(case):
+def _replace_lab_evidence(case, run, options, selection):
+    selected = tuple(selection)
+    loaded = read_case(run, case.ticket.lab_id, list(selected))
+    labels = tuple(f"Screenshot {options.index(name) + 1}" for name in selected)
+    case.set_evidence(LAB, Evidence(labels, loaded.images, selected))
+    case.lab_selection = selected
+
+
+def _lab_failure(key, exc):
+    st.session_state[key] = record_failure(
+        "ticket-lab-evidence", exc, "Ticket Lab screenshots could not be loaded. The previous evidence was kept.",
+    )
+
+
+def _select_lab_screenshots(case, run, options, picker_key, warning_key):
+    try:
+        _replace_lab_evidence(case, run, options, st.session_state[picker_key])
+    except (ImportError, OSError, ValueError) as exc:
+        st.session_state[picker_key] = [name for name in case.lab_selection or () if name in options]
+        _lab_failure(warning_key, exc)
+    else:
+        st.session_state.pop(warning_key, None)
+
+
+def _select_evidence_source(case, source_key, warning_key):
+    source = st.session_state[source_key]
+    if source == LAB and source != case.evidence_source:
+        try:
+            run = RUNS / case.ticket.lab_run
+            options = list_evidence(run, case.ticket.lab_id)
+            selected = case.lab_selection or options[:1]
+            if not selected:
+                raise ValueError("No Ticket Lab screenshots available.")
+            _replace_lab_evidence(case, run, options, selected)
+        except (ImportError, OSError, ValueError) as exc:
+            st.session_state[source_key] = case.evidence_source
+            _lab_failure(warning_key, exc)
+            return
+    case.set_evidence_source(source)
+    st.session_state.pop(warning_key, None)
+
+
+def load_lab_evidence(case, warning_key):
     run = RUNS / case.ticket.lab_run
     try:
         options = list_evidence(run, case.ticket.lab_id)
@@ -425,27 +479,24 @@ def load_lab_evidence(case):
         if case.evidence.images:
             st.caption("Showing saved screenshots. The original Ticket Lab files are unavailable.")
         else:
-            case.set_evidence(LAB, Evidence(), record_failure("ticket-lab-evidence", exc, "Ticket Lab screenshots could not be loaded."))
+            st.warning(failure_text(record_failure("ticket-lab-evidence", exc, "Ticket Lab screenshots could not be loaded.")))
         return
-    try:
-        if case.evidence.images and not set(case.lab_selection or ()).issubset(options):
-            st.caption("Showing saved screenshots. The original Ticket Lab files are unavailable.")
-            return
-        if not options:
-            st.caption("This synthetic run contains no screenshots for the selected ticket.")
-        default = options[:1] if case.lab_selection is None else [name for name in case.lab_selection if name in options]
-        selected = tuple(st.multiselect(
-            "Synthetic screenshots", options, default=default, max_selections=MAX_IMAGES,
-            key=wizard_key(f"wizard_lab_images_{case.revision}"),
-            format_func=lambda name: f"Screenshot {options.index(name) + 1}",
-        ))
-        if selected != case.lab_selection or LAB in case.evidence_errors:
-            case.lab_selection = selected
-            loaded = read_case(run, case.ticket.lab_id, list(selected))
-            labels = tuple(f"Screenshot {options.index(name) + 1}" for name in selected)
-            case.set_evidence(LAB, Evidence(labels, loaded.images, selected))
-    except (ImportError, OSError, ValueError) as exc:
-        case.set_evidence(LAB, Evidence(), record_failure("ticket-lab-evidence", exc, "Ticket Lab screenshots could not be loaded."))
+    if case.lab_selection is None and not case.evidence.images and options and warning_key not in st.session_state:
+        try:
+            _replace_lab_evidence(case, run, options, options[:1])
+        except (ImportError, OSError, ValueError) as exc:
+            _lab_failure(warning_key, exc)
+    if case.evidence.images and not set(case.lab_selection or ()).issubset(options):
+        st.caption("Showing saved screenshots. Some of the original Ticket Lab files are unavailable.")
+    if not options:
+        st.caption("This synthetic run contains no screenshots for the selected ticket.")
+    picker_key = wizard_key(f"wizard_lab_images_{case.revision}")
+    st.session_state.setdefault(picker_key, [name for name in case.lab_selection or () if name in options])
+    st.multiselect(
+        "Synthetic screenshots", options, max_selections=MAX_IMAGES, key=picker_key,
+        format_func=lambda name: f"Screenshot {options.index(name) + 1}",
+        on_change=_select_lab_screenshots, args=(case, run, options, picker_key, warning_key),
+    )
 
 
 def capture_uploads(case, key):
@@ -525,18 +576,21 @@ def show_screenshots(case):
 
 
 def show_evidence_investigation(case, workspace, attempt):
+    warning_key = wizard_key(f"lab_replacement_warning_{case.revision}")
     if case.ticket.lab_id:
-        source = st.radio(
-            "Evidence source", [LAB, MANUAL], index=int(case.evidence_source == MANUAL),
-            horizontal=True, key=wizard_key(f"wizard_evidence_source_{case.revision}"),
+        source_key = wizard_key(f"wizard_evidence_source_{case.revision}")
+        st.session_state.setdefault(source_key, case.evidence_source)
+        st.radio(
+            "Evidence source", [LAB, MANUAL], index=None,
+            horizontal=True, key=source_key,
+            on_change=_select_evidence_source, args=(case, source_key, warning_key),
         )
-        case.set_evidence_source(source)
 
     with st.container(border=True):
         st.subheader("Screenshots")
         st.caption("Review up to 3 PNG, JPEG, or WebP images, each up to 8 MiB. Redact sensitive content before submitting.")
         if case.evidence_source == LAB:
-            load_lab_evidence(case)
+            load_lab_evidence(case, warning_key)
         else:
             key = wizard_key(f"guided_evidence_upload_{case.revision}_{case.upload_revision}")
             st.file_uploader(
@@ -548,6 +602,8 @@ def show_evidence_investigation(case, workspace, attempt):
                     case.clear_manual_evidence()
                     if workspace.checkpoint(case):
                         st.rerun()
+        if warning_key in st.session_state:
+            st.warning(failure_text(st.session_state[warning_key]))
         show_screenshots(case)
 
     workspace.checkpoint(case)

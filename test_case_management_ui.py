@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 from tempfile import TemporaryDirectory
 import unittest
 from types import SimpleNamespace
@@ -21,6 +22,8 @@ from investigation_state import LAB, MANUAL, Evidence, Investigation, Ticket
 from presentation_safety import AI_EVIDENCE_STATUS_LABEL, AI_UNVERIFIED_NOTICE, SCREENSHOT_ATTRIBUTION_NOTICE
 from test_case_repository import PNG
 from test_ticket_lab_integration import ASSESSMENT, VALIDATION, gemini_confirmation, submit_gemini
+from ticket_lab import generate_run
+from ticket_lab_inputs import list_evidence, read_case, read_catalog
 
 
 APP = Path(__file__).with_name("dashboard_v1_2.py")
@@ -55,11 +58,14 @@ class CaseManagementUITest(unittest.TestCase):
         widgets = getattr(app, widget_type)
         return next(widget for widget in widgets if widget.key and widget.key.endswith(suffix))
 
-    def open_case(self, app, case_id):
+    def request_open(self, app, case_id):
         self.go_to(app, MANAGEMENT)
         app.selectbox(key="case_selected").select(case_id)
         self.run_app(app)
         self.click(app, "case_open")
+
+    def open_case(self, app, case_id):
+        self.request_open(app, case_id)
         self.assertEqual(WIZARD, app.session_state["case_workspace_view"])
 
     def go_to(self, app, view):
@@ -216,7 +222,8 @@ class CaseManagementUITest(unittest.TestCase):
             self.assertEqual("Other case draft", draft.value)
             draft.set_value("Unsaved edits")
             self.run_app(app)
-            self.open_case(app, evidence.metadata.case_id)
+            self.request_open(app, evidence.metadata.case_id)
+            self.click(app, "case_switch_discard")
             consent = gemini_confirmation(app, "evidence")
             self.assertNotEqual(first_consent_key, consent.key)
             self.assertFalse(consent.value)
@@ -235,6 +242,140 @@ class CaseManagementUITest(unittest.TestCase):
         self.open_case(app, saved.metadata.case_id)
         self.assertEqual(state.evidence_provenance, app.session_state["investigation"].evidence_provenance)
         self.assertEqual(saved.metadata, self.repository.load(saved.metadata.case_id).metadata)
+
+    def test_dirty_open_can_cancel_then_save_before_switching(self):
+        original = self.repository.create("Original case")
+        target = self.repository.create("Destination case")
+        original_id, target_id = original.metadata.case_id, target.metadata.case_id
+        app = self.start()
+        self.open_case(app, original_id)
+        # Deliver the text change and sidebar navigation in the same run.
+        self.widget(app, "text_area", "ticket_description").set_value("Pending analyst draft")
+        self.go_to(app, MANAGEMENT)
+        self.request_open(app, target_id)
+        self.run_app(app)
+        self.assertTrue(app.button(key="case_switch_save"))
+        self.assertEqual(original.metadata, self.repository.load(original_id).metadata)
+        self.click(app, "case_switch_cancel")
+        self.go_to(app, WIZARD)
+        self.assertEqual("Pending analyst draft", self.widget(app, "text_area", "ticket_description").value)
+        self.request_open(app, target_id)
+        self.click(app, "case_switch_save")
+        self.assertEqual(target.metadata, app.session_state["case_metadata"])
+        saved = self.repository.load(original_id)
+        self.assertEqual(2, saved.metadata.version)
+        self.assertEqual("Pending analyst draft", saved.investigation.manual_draft.description)
+        self.assertEqual(original, self.repository.load(original_id, version=1))
+        self.assertEqual(target, self.repository.load(target_id))
+
+    def test_dirty_session_new_case_requires_explicit_choice(self):
+        app = self.start()
+        self.widget(app, "text_area", "ticket_description").set_value("Investigation before creating any case")
+        self.go_to(app, MANAGEMENT)
+        self.widget(app, "text_input", "new_case_title").set_value("New destination")
+        self.run_app(app)
+        self.click(app, "case_new")
+        self.assertTrue(app.button(key="case_switch_save").disabled)
+        self.click(app, "case_switch_cancel")
+        self.assertFalse(self.repository.list_cases())
+        self.widget(app, "text_input", "new_case_title").set_value("New destination")
+        self.run_app(app)
+        self.click(app, "case_new")
+        app.text_input(key="case_switch_save_title").set_value("Saved investigation")
+        self.run_app(app)
+        self.click(app, "case_switch_save")
+        cases = {row.title: self.repository.load(row.case_id) for row in self.repository.list_cases()}
+        self.assertEqual({"Saved investigation", "New destination"}, set(cases))
+        self.assertEqual("Investigation before creating any case", cases["Saved investigation"].investigation.manual_draft.description)
+        self.assertEqual(Investigation(), cases["New destination"].investigation)
+        self.assertEqual(cases["New destination"].metadata, app.session_state["case_metadata"])
+
+        self.widget(app, "text_area", "ticket_description").set_value("Deliberately discarded")
+        self.go_to(app, MANAGEMENT)
+        self.widget(app, "text_input", "new_case_title").set_value("After discard")
+        self.run_app(app)
+        self.click(app, "case_new")
+        self.click(app, "case_switch_discard")
+        self.assertEqual("After discard", app.session_state["case_metadata"].title)
+        self.assertEqual(cases["New destination"], self.repository.load(cases["New destination"].metadata.case_id))
+
+    def test_switch_save_failure_preserves_draft_and_does_not_create_target(self):
+        original = self.repository.create("Original case for failed save")
+        app = self.start()
+        self.open_case(app, original.metadata.case_id)
+        self.widget(app, "text_area", "ticket_description").set_value("Draft retained after failure")
+        self.go_to(app, MANAGEMENT)
+        self.widget(app, "text_input", "new_case_title").set_value("Must not be created")
+        self.run_app(app)
+        self.click(app, "case_new")
+        with patch.object(CaseRepository, "save", side_effect=OSError("simulated write failure")):
+            self.click(app, "case_switch_save")
+        self.assertEqual(MANAGEMENT, app.session_state["case_workspace_view"])
+        self.assertNotIn("case_pending_switch", app.session_state)
+        self.assertTrue(any("Could not save this case" in item.value for item in app.error))
+        self.assertEqual([original.metadata], self.repository.list_cases())
+        self.go_to(app, WIZARD)
+        self.assertEqual("Draft retained after failure", self.widget(app, "text_area", "ticket_description").value)
+
+    def test_invalid_lab_replacements_keep_selection_assessment_and_row_version(self):
+        scratch_app = self.path.with_name(APP.name)
+        shutil.copyfile(APP, scratch_app)
+        run = generate_run(self.path.parent / "runs", count=1, seed=14, with_evidence=True)
+        ticket_id = next(iter(read_catalog(run)))
+        filenames = list_evidence(run, ticket_id)
+        old, replacement = filenames[:2]
+        lab = read_case(run, ticket_id, [old])
+        state = Investigation(step=3, ticket=Ticket(lab.description, lab_run=run.name, lab_id=ticket_id))
+        state.set_evidence_source(LAB)
+        state.lab_selection = (old,)
+        state.set_evidence(LAB, Evidence(("Screenshot 1",), lab.images, state.lab_selection))
+        state.reviewed_fingerprint, state.reviewed_evidence = state.fingerprint, ASSESSMENT
+        saved = self.repository.create("Atomic screenshot replacement", state)
+        case_id = saved.metadata.case_id
+        app = self.run_app(AppTest.from_file(str(scratch_app)))
+        self.open_case(app, case_id)
+        path = run / "evidence" / replacement
+        valid_bytes = path.read_bytes()
+        path.unlink()
+
+        def reject_replacement():
+            self.widget(app, "multiselect", "wizard_lab_images_0").set_value([old, replacement])
+            self.run_app(app)
+            live = app.session_state["investigation"]
+            self.assertTrue(any("previous evidence was kept" in item.value for item in app.warning))
+            self.assertFalse(any("Session State API" in item.value for item in app.warning))
+            self.assertEqual([old], self.widget(app, "multiselect", "wizard_lab_images_0").value)
+            self.assertEqual(state, live)
+            self.assertEqual(saved, self.repository.load(case_id))
+            self.assertEqual(1, len(self.repository.history(case_id)))
+
+        reject_replacement()
+        path.write_bytes(b"corrupt image")
+        reject_replacement()
+        path.write_bytes(valid_bytes)
+        manifest = run / "manifest.json"
+        valid_manifest = manifest.read_bytes()
+        manifest.write_text('{"tickets": [null]}', encoding="utf-8")
+        reject_replacement()
+        manifest.write_bytes(valid_manifest)
+        real_open = Path.open
+
+        def unreadable(candidate, *args, **kwargs):
+            if candidate == path:
+                raise PermissionError("simulated unreadable screenshot")
+            return real_open(candidate, *args, **kwargs)
+
+        with patch.object(Path, "open", unreadable):
+            reject_replacement()
+        self.run_app(app)
+        self.assertEqual(saved, self.repository.load(case_id))
+        self.widget(app, "multiselect", "wizard_lab_images_0").set_value([replacement])
+        self.run_app(app)
+        updated = self.repository.load(case_id)
+        self.assertEqual(2, updated.metadata.version)
+        self.assertEqual((replacement,), updated.investigation.lab_selection)
+        self.assertIsNone(updated.investigation.evidence_assessment)
+        self.assertEqual(saved, self.repository.load(case_id, version=1))
 
     def gemini_case(self, action):
         state = Investigation(step=3 if action == "evidence" else 1, ticket=Ticket("Synthetic ticket", "high", 19, 7))
@@ -462,11 +603,17 @@ class CaseManagementUITest(unittest.TestCase):
         self.open_case(app, case_id)
         latest = self.repository.transition(case_id, 1, CaseStatus.IN_PROGRESS)
         self.widget(app, "text_area", "ticket_description").set_value("Stale edit")
-        self.click(app, "case_save")
+        self.request_open(app, case_id)
+        self.click(app, "case_switch_save")
         self.assertTrue(any("Another session changed" in alert.value for alert in app.error))
         self.assertEqual(latest.metadata, self.repository.load(case_id).metadata)
+        self.assertEqual(MANAGEMENT, app.session_state["case_workspace_view"])
+        self.assertNotIn("case_pending_switch", app.session_state)
+        self.assertEqual("Stale edit", app.session_state["investigation"].manual_draft.description)
+        self.go_to(app, WIZARD)
         self.assertTrue(app.button(key="case_save").disabled)
-        self.open_case(app, case_id)
+        self.request_open(app, case_id)
+        self.click(app, "case_switch_discard")
         self.assertFalse(app.error)
         self.assertEqual(latest.investigation.manual_draft.description, self.widget(app, "text_area", "ticket_description").value)
 

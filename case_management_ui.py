@@ -50,6 +50,8 @@ def navigation_view():
 
 def _set_view(view):
     st.session_state[_VIEW_KEY] = view
+    if view == WIZARD:
+        st.session_state.pop("case_pending_switch", None)
 
 
 def wizard_key(key):
@@ -67,7 +69,7 @@ def _checkpoint_state(investigation):
 class CaseWorkspace:
     def __init__(self):
         self.repository = CaseRepository()
-        self.error = None
+        self.error = st.session_state.pop("case_switch_error", None)
         self.available = True
         if self.repository.path.exists():
             try:
@@ -90,15 +92,18 @@ class CaseWorkspace:
     def conflicted(self):
         return st.session_state.get("case_conflict", False)
 
+    def dirty(self, investigation):
+        baseline = Investigation() if self.active is None else None
+        checkpoint = _checkpoint_state(baseline) if baseline is not None else st.session_state.case_checkpoint
+        draft = baseline.manual_draft if baseline is not None else st.session_state.case_saved_draft
+        return investigation.manual_draft != draft or _checkpoint_state(investigation) != checkpoint
+
     def save_status(self, investigation):
         if self.conflicted:
             return "Save conflict", "red"
         if self.active is None:
             return "Unsaved session", "gray"
-        if self.editable and (
-            investigation.manual_draft != st.session_state.get("case_saved_draft", investigation.manual_draft)
-            or st.session_state.get("case_unsaved_checkpoint", False)
-        ):
+        if self.dirty(investigation):
             return "Unsaved changes", "orange"
         return "Saved", "green"
 
@@ -121,20 +126,20 @@ class CaseWorkspace:
         st.session_state.case_metadata = saved.metadata
         st.session_state.case_checkpoint = _checkpoint_state(saved.investigation)
         st.session_state.case_saved_draft = saved.investigation.manual_draft
-        st.session_state.case_unsaved_checkpoint = False
         st.session_state.case_conflict = False
+        st.session_state.pop("gemini_attempt", None)
+        st.session_state.pop("case_pending_switch", None)
         if open_wizard:
             _set_view(WIZARD)
         st.rerun()
 
-    def checkpoint(self, investigation, *, explicit=False, submit=False):
+    def checkpoint(self, investigation, *, explicit=False, submit=False, rerun_on_conflict=True):
         if self.active is None:
             return True
         if not self.editable:
             return False
         state = _checkpoint_state(investigation)
         pending = state != st.session_state.case_checkpoint
-        st.session_state.case_unsaved_checkpoint = pending
         if not self.available:
             return False
         if not (explicit or submit or pending):
@@ -149,7 +154,9 @@ class CaseWorkspace:
                 saved = self.repository.save(self.active.case_id, self.active.version, investigation)
         except CaseConflictError:
             st.session_state.case_conflict = True
-            st.rerun()
+            if rerun_on_conflict:
+                st.rerun()
+            return False
         except (OSError, sqlite3.Error, ValueError, KeyError):
             self.error = "Could not save this case. Your changes are still in this session."
             return False
@@ -157,7 +164,6 @@ class CaseWorkspace:
         st.session_state.case_metadata = saved.metadata
         st.session_state.case_checkpoint = state
         st.session_state.case_saved_draft = saved.investigation.manual_draft
-        st.session_state.case_unsaved_checkpoint = False
         return True
 
     def check_gemini_version(self):
@@ -202,7 +208,7 @@ class CaseWorkspace:
 
     def _show_messages(self):
         if self.conflicted:
-            st.error("Another session changed this case. Your changes were not saved. Use Open Case in Case Management to load the latest version and replace your local edits.")
+            st.error("Another session changed this case. Your changes were not saved. Open the latest version in Case Management when you are ready to discard your local edits.")
         if self.error:
             st.error(self.error)
 
@@ -227,8 +233,11 @@ class CaseWorkspace:
             st.header(MANAGEMENT)
             st.button("Back to Investigation Wizard", icon=":material/arrow_back:", key="management_back",
                       on_click=_set_view, args=(WIZARD,))
-        if self.available:
-            selected = self._render_case_list()
+        pending = st.session_state.get("case_pending_switch")
+        if pending is not None:
+            self._confirm_switch(investigation, pending)
+        elif self.available:
+            selected = self._render_case_list(investigation)
             if self.active is not None:
                 self._render_lifecycle(investigation)
             audit_case_id = selected or (self.active.case_id if self.active is not None else None)
@@ -236,7 +245,63 @@ class CaseWorkspace:
                 render_case_history(self.repository, audit_case_id)
         self._show_messages()
 
-    def _render_case_list(self):
+    def _switch(self, action, target):
+        try:
+            if action == "open":
+                saved = self.repository.load(target)
+            else:
+                self.repository.initialize()
+                st.session_state.case_db_initialized = self.repository.path
+                saved = self.repository.create(target, Investigation())
+        except (OSError, sqlite3.Error, ValueError, KeyError):
+            self.error = "Could not open the selected case." if action == "open" else "Could not create the case."
+            return
+        self._activate(saved, open_wizard=True)
+
+    def _request_switch(self, investigation, action, target):
+        if self.dirty(investigation):
+            st.session_state.case_pending_switch = (action, target)
+            st.rerun()
+        self._switch(action, target)
+
+    def _confirm_switch(self, investigation, pending):
+        action, target = pending
+        with st.container(border=True):
+            st.warning("This investigation has unsaved changes. Choose what to do before opening another case or creating a new one.")
+            st.text(f"Open case {target}" if action == "open" else f"New case · {target}")
+            title = None
+            if self.active is None:
+                title = st.text_input("Title for the current investigation", key="case_switch_save_title").strip()
+            with st.container(horizontal=True):
+                save = st.button("Save", key="case_switch_save", type="primary",
+                                 disabled=not self.available or not self.editable or title == "")
+                discard = st.button("Discard", key="case_switch_discard", disabled=not self.available)
+                cancel = st.button("Cancel", key="case_switch_cancel")
+        if cancel:
+            st.session_state.pop("case_pending_switch")
+            st.rerun()
+        if save or discard:
+            st.session_state.pop("case_pending_switch")
+            if save:
+                if self.active is None:
+                    try:
+                        self.repository.initialize()
+                        st.session_state.case_db_initialized = self.repository.path
+                        saved = self.repository.create(title, investigation)
+                    except (OSError, sqlite3.Error, ValueError):
+                        st.session_state.case_switch_error = "Could not save this investigation. Your changes are still in this session."
+                        st.rerun()
+                    st.session_state.case_metadata = saved.metadata
+                    st.session_state.case_checkpoint = _checkpoint_state(investigation)
+                    st.session_state.case_saved_draft = saved.investigation.manual_draft
+                elif not self.checkpoint(investigation, explicit=True, rerun_on_conflict=False):
+                    st.session_state.case_switch_error = self.error
+                    st.rerun()
+            self._switch(action, target)
+            st.session_state.case_switch_error = self.error
+            st.rerun()
+
+    def _render_case_list(self, investigation):
         try:
             exists = self.repository.path.exists()
             active = self.repository.list_cases() if exists else []
@@ -276,20 +341,12 @@ class CaseWorkspace:
             format_func=lambda case_id: f"{titles[case_id]} · {case_id}",
         )
         if opener.button("Open Case", key="case_open", disabled=selected is None):
-            try:
-                self._activate(self.repository.load(selected), open_wizard=True)
-            except (OSError, sqlite3.Error, ValueError, KeyError):
-                self.error = "Could not open the selected case."
+            self._request_switch(investigation, "open", selected)
 
         title_col, new_col = st.columns([3, 1], vertical_alignment="bottom")
         title = title_col.text_input("New case title", key=wizard_key("new_case_title"))
         if new_col.button("New Case", key="case_new", disabled=not title.strip()):
-            try:
-                self.repository.initialize()
-                st.session_state.case_db_initialized = self.repository.path
-                self._activate(self.repository.create(title, Investigation()), open_wizard=True)
-            except (OSError, sqlite3.Error, ValueError):
-                self.error = "Could not create the case. Check the configured database path and permissions."
+            self._request_switch(investigation, "new", title)
         return selected
 
     def _render_lifecycle(self, investigation):
