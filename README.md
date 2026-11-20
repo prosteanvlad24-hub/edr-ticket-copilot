@@ -1,10 +1,12 @@
 # EDR Ticket Copilot
 
-**AI-Assisted Endpoint Security Investigation & Triage**
+**v0.5.0-rc1 · AI-assisted endpoint security investigation and triage**
 
 EDR Ticket Copilot is a Python-based investigation prototype designed to help endpoint security analysts triage incidents, interpret security alerts, assess supporting evidence, and generate structured investigation reports.
 
 The project combines deterministic security rules with Google Gemini-assisted analysis through a guided five-step Streamlit workflow.
+
+**Supported RC scope:** Single-user evaluation on a trusted workstation using synthetic or redacted data. Run the app on loopback. Public hosting, shared access, and production investigations are outside the supported scope.
 
 ## Key Features
 
@@ -12,17 +14,17 @@ The project combines deterministic security rules with Google Gemini-assisted an
 - **Rule-based triage:** Local incident classification, heuristic severity scoring, and investigation priority recommendations.
 - **IOC extraction:** Identification of candidate IPv4 addresses, domains, URLs, and cryptographic hashes, including partial-hash handling.
 - **AI-assisted analysis:** Google Gemini integration for preliminary incident assessment, investigation recommendations, and evidence reassessment.
-- **Screenshot evidence review:** Image validation, evidence identification, and comparison against ticket-reported information.
-- **Evidence provenance:** Screenshot identifiers and SHA256 fingerprints to support traceability.
+- **Screenshot evidence review:** Manual uploads stage a validated file list for explicit confirmation. Accepted screenshots carry source identifiers and SHA-256 hashes.
 - **Structured reporting:** Exportable Markdown and JSON investigation outputs.
-- **Local case management:** Versioned investigations, retained screenshot evidence, analyst decisions, notes, and issued reports.
+- **Local case management:** SQLite-backed investigations with saved wizard progress, lifecycle actions, and protection against stale writes and accidental loss of unsaved edits.
+- **Investigation history:** Read-only snapshots, historical screenshot provenance, analyst notes, and byte-exact downloads of issued reports.
+- **Analyst feedback:** Optional case verdicts and separate quality ratings for specific saved AI responses.
 - **Synthetic incident testing:** Ticket Lab scenarios for investigating suspicious endpoint activity without requiring a production EDR environment.
 
 
-## Application Screenshots
+## Historical screenshots
 
-The following screenshots demonstrate the EDR Ticket Copilot
-investigation workflow using synthetic incident data.
+These screenshots show an earlier build using synthetic Ticket Lab data. They predate the RC case workspace, current AI trust labels, and manual screenshot confirmation flow. Use the workflow instructions below for the RC.
 
 ### 1. Investigation Wizard
 
@@ -76,30 +78,51 @@ sources, with recommendations for further investigation.
 - Git
 - Optional: Google Gemini API key for AI-assisted features
 
-### Installation
+### Select the RC source
+
+To try the RC branch after it is available on GitHub, clone it explicitly.
 
 ```bash
-git clone https://github.com/prosteanvlad24-hub/edr-ticket-copilot.git
+git clone --branch feature/case-management https://github.com/prosteanvlad24-hub/edr-ticket-copilot.git
 cd edr-ticket-copilot
+```
 
+Once the `v0.5.0-rc1` tag is published, use the following commands from an existing clone to check out that exact release.
+
+```bash
+git fetch origin tag v0.5.0-rc1
+git switch --detach v0.5.0-rc1
+```
+
+### Installation
+
+From the repository root, use Python 3.11 to create a virtual environment.
+
+```bash
 python -m venv .venv
 ```
 
-Activate the virtual environment on Windows:
+On Windows PowerShell, activate the environment with the following command.
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 ```
 
-Install dependencies:
+On macOS or Linux, activate it with the following command.
 
 ```bash
-pip install -r requirements.txt
+source .venv/bin/activate
 ```
 
-### Gemini Configuration
+Install the declared dependencies in the active environment.
 
-Create a `.env` file in the project directory:
+```bash
+python -m pip install -r requirements.txt
+```
+
+### Optional Gemini configuration
+
+Local analysis, cases, and reports work without a Gemini key. To enable the optional Gemini actions, set `GEMINI_API_KEY` in the environment or in a local `.env` file in the project directory.
 
 ```env
 GEMINI_API_KEY=your_api_key_here
@@ -110,7 +133,7 @@ Never commit API keys or credentials to version control.
 ### Run the Application
 
 ```bash
-streamlit run dashboard_v1_2.py --server.address=127.0.0.1
+python -m streamlit run dashboard_v1_2.py --server.address=127.0.0.1
 ```
 
 Open `http://127.0.0.1:8501` on the machine running the app. Launch from the repository root so Streamlit loads the bundled configuration. EDR Ticket Copilot is intended for local, single-analyst use.
@@ -121,7 +144,7 @@ Use **Case Management** to create, open, archive, or restore a case. The canonic
 
 For a dirty investigation, Save, Discard, or Cancel resolves a case switch. A failed or stale save keeps the draft in the current session. **Analyst decisions** in Case Management lets you record an optional incident verdict separately from an optional rating of a specific saved AI output. The lifecycle, verdict, and rating are independent. Archived cases retain their decisions and can be restored before adding new ones.
 
-Case History shows saved versions and evidence. **Issue report for saved version** stores the Markdown and JSON together. Later downloads return the issued bytes. The wizard's ordinary export does not issue a case-history record.
+**Case History** shows read-only saved versions, screenshot provenance, and analyst notes without replacing the active draft. **Issue report for saved version** stores Markdown and JSON together and links displayed AI outputs to their recorded ratings. Later downloads return the issued bytes. The wizard's ordinary export does not issue a case-history record.
 
 ### Local storage
 
@@ -132,8 +155,14 @@ Set `EDR_CASE_DB_PATH` to an absolute path outside the checkout to override the 
 1. **Ticket Entry:** Enter incident details manually or select a synthetic Ticket Lab scenario.
 2. **Initial Analysis:** Run local classification, severity assessment, IOC extraction, and optional AI analysis.
 3. **Initial Findings:** Review preliminary results and investigation recommendations.
-4. **Evidence Investigation:** Submit screenshots for reassessment and identify discrepancies between evidence sources.
+4. **Evidence Investigation:** Inspect Ticket Lab evidence or stage manual uploads. Confirm the displayed manual replacement list before applying it. Gemini reassessment requires a separate, fresh authorization.
 5. **Final Report:** Review and export the investigation findings.
+
+### Confirm manual screenshot replacements
+
+Uploading files stages a candidate without changing accepted evidence or its reassessment. A batch containing an invalid file that reaches Python is rejected as a whole. Streamlit can reject files in the browser before Python receives them. The app cannot tell whether a missing file was rejected or never selected, and an entirely rejected selection may leave an earlier candidate visible if Streamlit sends no change event.
+
+Review the exact filenames beside **Apply screenshot replacement**. Apply only when the displayed list matches the intended replacement. For a saved case, a successful replacement creates one new version and invalidates the previous reassessment. Failed or stale saves preserve the accepted evidence. **Clear uploaded screenshots** is a separate, explicit action.
 
 ## Automated Testing
 
@@ -166,7 +195,7 @@ This project is an investigation-support prototype, not a production EDR platfor
 
 ## Project Status
 
-**Version under verification:** v0.5
+**Release candidate:** v0.5.0-rc1. The tag checkout above applies once the tag is published.
 
 
 ## Author
