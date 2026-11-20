@@ -297,7 +297,7 @@ def run_gemini_module(case, workspace, module, analyzer):
             investigation.results[module] = result
         investigation.errors.pop(module, None)
 
-    workspace.save_gemini_result(case, apply_result)
+    workspace.save_gemini_result(case, apply_result, module)
 
 
 def show_initial_analysis(case, workspace, attempt):
@@ -628,7 +628,7 @@ def show_evidence_investigation(case, workspace, attempt):
                 investigation.reviewed_evidence = result
                 investigation.reassessment_error = None
 
-            workspace.save_gemini_result(case, apply_result)
+            workspace.save_gemini_result(case, apply_result, "evidence")
 
     if case.reassessment_error:
         st.error("Evidence reassessment failed. You can retry or continue to the report.")

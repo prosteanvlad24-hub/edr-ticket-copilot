@@ -31,6 +31,65 @@ class CaseRepositoryTest(unittest.TestCase):
     def move(self, case, status):
         return self.repository.transition(case.metadata.case_id, case.metadata.version, status, rationale="Analyst decision")
 
+    def test_explicit_decisions_are_independent_versioned_and_optimistic(self):
+        case = self.repository.create("Decisions", Investigation(results={"ai": "Saved assessment"}))
+        case_id = case.metadata.case_id
+        output_id, = self.repository.reviewable_outputs(case_id, 1)
+        verdict = self.repository.set_incident_verdict(case_id, 1, IncidentVerdict.BENIGN)
+        self.assertEqual(CaseStatus.DRAFT, verdict.status)
+        self.assertEqual(AssessmentQuality.NOT_REVIEWED, self.repository.assessment_quality(case_id, 2)[0]["quality"])
+        with self.assertRaises(CaseConflictError):
+            self.repository.review_assessment(case_id, 1, output_id, AssessmentQuality.CORRECT)
+        reviewed = self.repository.review_assessment(case_id, 2, output_id, AssessmentQuality.PARTIALLY_CORRECT,
+                                                      reviewer_label=" Analyst label ", rationale=" Limited support ")
+        self.assertEqual(IncidentVerdict.BENIGN, reviewed.incident_verdict)
+        self.assertEqual(CaseStatus.DRAFT, reviewed.status)
+        self.assertEqual(reviewed, self.repository.review_assessment(
+            case_id, 3, output_id, AssessmentQuality.PARTIALLY_CORRECT, reviewer_label="Analyst label",
+            rationale="Limited support",
+        ))
+        reviews = self.repository.assessment_quality(case_id, 3)
+        self.assertEqual(("Analyst label", "Limited support"), (reviews[0]["reviewer_label"], reviews[0]["rationale"]))
+        self.assertEqual(AssessmentQuality.NOT_REVIEWED, self.repository.assessment_quality(case_id, 1)[0]["quality"])
+        self.assertEqual(case, self.repository.load(case_id, version=1))
+
+        # A new successful run gets a fresh identity even if its bytes are identical.
+        repeated = self.repository.save(case_id, 3, case.investigation, ai_module="ai")
+        second_id, = self.repository.reviewable_outputs(case_id, repeated.metadata.version)
+        self.assertNotEqual(output_id, second_id)
+        self.assertEqual([AssessmentQuality.PARTIALLY_CORRECT, AssessmentQuality.NOT_REVIEWED],
+                         [row["quality"] for row in self.repository.assessment_quality(case_id, 4)])
+        with self.assertRaises(ValueError):
+            self.repository.review_assessment(case_id, 4, output_id, AssessmentQuality.CORRECT)
+        active = self.move(repeated, CaseStatus.IN_PROGRESS)
+        closed = self.move(active, CaseStatus.CLOSED_INCONCLUSIVE)
+        self.assertEqual(IncidentVerdict.BENIGN, closed.metadata.incident_verdict)
+        archived = self.move(closed, CaseStatus.ARCHIVED)
+        with self.assertRaises(InvalidTransitionError):
+            self.repository.set_incident_verdict(case_id, archived.metadata.version, IncidentVerdict.MALICIOUS)
+        self.assertEqual(CaseStatus.CLOSED_INCONCLUSIVE, self.move(archived, CaseStatus.CLOSED_INCONCLUSIVE).metadata.status)
+
+    def test_legacy_schema_and_snapshot_stay_readable_when_rating_saved_output(self):
+        # Construct a pre-Phase 4E snapshot with output but no assessment registration.
+        with patch.object(CaseRepository, "_register_outputs"):
+            old = self.repository.create("Legacy", Investigation(results={"ai": "Legacy response"}))
+        case_id = old.metadata.case_id
+        self.repository.initialize()
+        with self.assertRaises(ValueError):
+            self.repository.transition(case_id, 1, "OPEN")
+        with closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual(1, db.execute("PRAGMA user_version").fetchone()[0])
+        assessment_id, = self.repository.reviewable_outputs(case_id, 1)
+        self.assertEqual([], self.repository.assessment_quality(case_id, 1))
+        review = self.repository.review_assessment(case_id, 1, assessment_id, AssessmentQuality.INCORRECT)
+        self.assertEqual(2, review.version)
+        self.assertEqual(old, self.repository.load(case_id, version=1))
+        self.assertEqual([], self.repository.assessment_quality(case_id, 1))
+        saved, = self.repository.assessment_quality(case_id, 2)
+        self.assertEqual(assessment_id, saved["assessment_id"])
+        self.assertEqual("", saved["reviewer_label"])
+        self.assertEqual(AssessmentQuality.INCORRECT, saved["quality"])
+
     def test_initialization_and_migration_rollback(self):
         case = self.repository.create("Migration baseline")
         self.repository.initialize()

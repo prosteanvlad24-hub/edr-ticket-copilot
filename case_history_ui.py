@@ -7,7 +7,7 @@ import sqlite3
 
 import streamlit as st
 
-from case_repository import CaseConflictError
+from case_repository import AI_MODULES, AssessmentQuality, CaseConflictError, CaseStatus, IncidentVerdict
 from evidence_inputs import prepare_images, screenshot_provenance
 from presentation_safety import (
     AI_EVIDENCE_STATUS_LABEL, AI_UNVERIFIED_NOTICE, SCREENSHOT_ATTRIBUTION_NOTICE, failure_text, record_failure,
@@ -43,7 +43,10 @@ def _issue_report(repository, case_id, version):
             "case_id": case_id, "version": version, "issued_at": issued_at,
             "lifecycle_status": saved.metadata.status.value,
             "incident_verdict": saved.metadata.incident_verdict.value,
-            "ai_assessment_quality": repository.assessment_quality(case_id, version),
+            "ai_assessment_quality": [
+                {key: row[key] for key in ("assessment_id", "assessment_version", "module", "quality", "review_version")}
+                for row in repository.assessment_quality(case_id, version)
+            ],
         }
         markdown, payload = build_report_exports(saved.investigation, audit=audit)
         # The existing SQLite enum is a storage key. New export bytes carry the public trust status.
@@ -62,6 +65,88 @@ def _issue_report(repository, case_id, version):
 
 def _notice(case_id, level, message):
     st.session_state.case_audit_notice = (case_id, level, message)
+
+
+def _post_decision(repository, case_id, version, choice_key, *, assessment_id=None, label_key=None, rationale_key=None):
+    try:
+        choice = st.session_state[choice_key]
+        if assessment_id is None:
+            saved = repository.set_incident_verdict(case_id, version, choice)
+        else:
+            if choice is None:
+                _notice(case_id, "error", "Choose an AI assessment quality before saving.")
+                return
+            saved = repository.review_assessment(
+                case_id, version, assessment_id, choice,
+                reviewer_label=st.session_state[label_key], rationale=st.session_state[rationale_key],
+            )
+    except CaseConflictError:
+        _notice(case_id, "error", "The saved version changed. Review the latest version before recording a decision.")
+    except (OSError, sqlite3.Error, ValueError, KeyError):
+        _notice(case_id, "error", "Could not record the analyst decision.")
+    else:
+        active = st.session_state.get("case_metadata")
+        if active is not None and (active.case_id, active.version) == (case_id, version):
+            # Decision-only versions preserve the saved wizard payload and the live draft.
+            st.session_state.case_metadata = saved
+        message = "No decision changes to save." if saved.version == version else f"Analyst decision recorded in version {saved.version}."
+        _notice(case_id, "success", message)
+
+
+def _render_decisions(repository, latest):
+    case_id, version = latest.case_id, latest.version
+    st.subheader("Analyst decisions")
+    st.caption(f"Decisions apply to saved version {version}. Lifecycle, incident verdict, and model quality are independent.")
+    st.text(f"Incident verdict · {latest.incident_verdict.value}")
+    editable = latest.status != CaseStatus.ARCHIVED
+    if not editable:
+        st.caption("Restore this case to record analyst decisions.")
+    if editable:
+        key = f"audit_verdict_{case_id}_{version}"
+        with st.form(f"{key}_form", enter_to_submit=False):
+            st.selectbox("Incident verdict", list(IncidentVerdict), key=key,
+                         index=list(IncidentVerdict).index(latest.incident_verdict))
+            st.form_submit_button("Save incident verdict", on_click=_post_decision,
+                                  args=(repository, case_id, version, key))
+    st.markdown("#### AI assessment quality")
+    st.caption("An optional rating of one saved model response. Record a reviewer label only if known. Ratings do not verify evidence or set the incident verdict.")
+    try:
+        outputs = repository.reviewable_outputs(case_id, version)
+        reviews = {row["assessment_id"]: row for row in repository.assessment_quality(case_id, version)}
+    except (OSError, sqlite3.Error, ValueError, KeyError):
+        st.error("Could not load saved assessments.")
+        return
+    if not outputs:
+        st.caption("This version has no saved AI output to review.")
+    for assessment_id, (module, _, output) in outputs.items():
+        review = reviews.get(assessment_id, {})
+        quality = AssessmentQuality(review.get("quality", AssessmentQuality.NOT_REVIEWED))
+        with st.expander(f"{AI_MODULES[module]} · {quality.value}"):
+            st.caption(AI_UNVERIFIED_NOTICE)
+            st.text(f"Assessment ID · {assessment_id}")
+            st.code(output, language=None)
+            _render_review_attribution(review)
+            if editable:
+                key = f"audit_quality_{assessment_id}_{version}"
+                label_key, rationale_key = f"{key}_label", f"{key}_rationale"
+                with st.form(f"{key}_form", clear_on_submit=True, enter_to_submit=False):
+                    st.radio(f"{AI_MODULES[module]} quality", list(AssessmentQuality), key=key, index=None)
+                    st.text_input("Reviewer label (optional, self-entered)", key=label_key, max_chars=120)
+                    st.text_area("Reason for rating (optional)", key=rationale_key, max_chars=4000)
+                    st.form_submit_button("Save AI assessment quality", on_click=_post_decision,
+                                          args=(repository, case_id, version, key),
+                                          kwargs={"assessment_id": assessment_id, "label_key": label_key,
+                                                  "rationale_key": rationale_key})
+
+
+def _render_review_attribution(review):
+    if review.get("review_version") is not None:
+        st.markdown("**Previous saved review**")
+        st.text(f"Recorded in version {review['review_version']} · {review['reviewed_at']}")
+        label = review["reviewer_label"]
+        st.text(f"Self-entered reviewer label · {label}" if label else "Reviewer label was not provided.")
+        if review["rationale"]:
+            st.text(review["rationale"])
 
 
 def _render_notes(notes):
@@ -206,10 +291,12 @@ def render_case_history(repository, case_id):
     notice = st.session_state.pop("case_audit_notice", None)
     if notice and notice[0] == case_id:
         (st.success if notice[1] == "success" else st.error)(notice[2])
+    _render_decisions(repository, latest)
     note_counts = Counter(note.version for note in notes)
     st.dataframe([
         {"Version": entry.version, "Saved (UTC)": entry.saved_at, "Lifecycle status": entry.status.value,
-         "Event": entry.event, "Transition reason": entry.rationale or "", "Analyst notes": note_counts[entry.version]}
+         "Incident verdict": entry.incident_verdict.value, "Event": entry.event,
+         "Transition reason": entry.rationale or "", "Analyst notes": note_counts[entry.version]}
         for entry in versions
     ], hide_index=True)
     version = st.selectbox("Inspect a saved version", [item.version for item in versions], index=None,

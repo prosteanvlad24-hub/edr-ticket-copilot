@@ -133,7 +133,7 @@ class CaseWorkspace:
             _set_view(WIZARD)
         st.rerun()
 
-    def checkpoint(self, investigation, *, explicit=False, submit=False, rerun_on_conflict=True):
+    def checkpoint(self, investigation, *, explicit=False, submit=False, rerun_on_conflict=True, ai_module=None):
         if self.active is None:
             return True
         if not self.editable:
@@ -151,7 +151,9 @@ class CaseWorkspace:
                     investigation=investigation,
                 )
             else:
-                saved = self.repository.save(self.active.case_id, self.active.version, investigation)
+                saved = self.repository.save(
+                    self.active.case_id, self.active.version, investigation, ai_module=ai_module,
+                )
         except CaseConflictError:
             st.session_state.case_conflict = True
             if rerun_on_conflict:
@@ -177,11 +179,11 @@ class CaseWorkspace:
                 st.session_state.case_conflict = True
                 st.rerun()
 
-    def save_gemini_result(self, investigation, apply_result):
+    def save_gemini_result(self, investigation, apply_result, module):
         if self.active is not None:
             candidate = deepcopy(investigation)
             apply_result(candidate)
-            if not self.checkpoint(candidate, explicit=True):
+            if not self.checkpoint(candidate, explicit=True, ai_module=module):
                 self.error = "Could not save the Google Gemini response. The response was discarded."
                 return
         apply_result(investigation)

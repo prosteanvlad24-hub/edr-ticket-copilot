@@ -17,7 +17,7 @@ import streamlit as st
 from streamlit.testing.v1 import AppTest
 
 from case_management_ui import MANAGEMENT, WIZARD
-from case_repository import CaseRepository, CaseStatus, IncidentVerdict
+from case_repository import AssessmentQuality, CaseRepository, CaseStatus, IncidentVerdict
 from investigation_state import LAB, MANUAL, Evidence, Investigation, Ticket
 from presentation_safety import AI_EVIDENCE_STATUS_LABEL, AI_UNVERIFIED_NOTICE, SCREENSHOT_ATTRIBUTION_NOTICE
 from test_case_repository import PNG
@@ -663,6 +663,137 @@ class CaseManagementUITest(unittest.TestCase):
         self.click(app, "management_back")
         self.assertEqual(live.metadata, app.session_state["case_metadata"])
         self.assertEqual("Live unsaved draft", self.widget(app, "text_area", "ticket_description").value)
+
+    def test_analyst_decision_forms_preserve_live_draft_and_restore_saved_history(self):
+        original = self.repository.create("Analyst decisions", Investigation(results={"ai": UNTRUSTED_MARKUP}))
+        case_id = original.metadata.case_id
+        app = self.start()
+        with patch.object(genai, "Client") as provider:
+            self.open_case(app, case_id)
+            self.widget(app, "text_area", "ticket_description").set_value("Unsaved draft survives decisions")
+            self.go_to(app, MANAGEMENT)
+            self.assertEqual(original.metadata, self.repository.load(case_id).metadata)
+            next(x for x in app.selectbox if x.label == "Incident verdict").select(IncidentVerdict.MALICIOUS)
+            next(x for x in app.button if x.label == "Save incident verdict").click()
+            self.run_app(app)
+            verdict = self.repository.load(case_id).metadata
+            self.assertEqual((2, CaseStatus.DRAFT, IncidentVerdict.MALICIOUS),
+                             (verdict.version, verdict.status, verdict.incident_verdict))
+            next(x for x in app.radio if x.label == "Initial AI analysis quality").set_value(AssessmentQuality.INCORRECT)
+            next(x for x in app.text_input if x.label.startswith("Reviewer label")).set_value("Local reviewer")
+            next(x for x in app.button if x.label == "Save AI assessment quality").click()
+            self.run_app(app)
+            latest = self.repository.load(case_id)
+            self.assertEqual((3, CaseStatus.DRAFT, IncidentVerdict.MALICIOUS),
+                             (latest.metadata.version, latest.metadata.status, latest.metadata.incident_verdict))
+            self.assertEqual(latest.metadata, app.session_state["case_metadata"])
+            self.assertEqual(original.investigation, latest.investigation)
+            self.go_to(app, WIZARD)
+            self.assertEqual("Unsaved draft survives decisions", self.widget(app, "text_area", "ticket_description").value)
+
+            fresh = self.start()
+            self.open_case(fresh, case_id)
+            self.go_to(fresh, MANAGEMENT)
+            self.assertTrue(any("Incident verdict · MALICIOUS" == item.value for item in fresh.text))
+            self.assertTrue(any("Self-entered reviewer label · Local reviewer" == item.value for item in fresh.text))
+            fresh.selectbox(key=f"audit_version_{case_id}").select(1)
+            self.run_app(fresh)
+            self.assertTrue(any("Incident verdict · NOT_ASSESSED" == item.value for item in fresh.text))
+            self.assertTrue(any("NOT_REVIEWED" in table.value.get("quality", []).tolist()
+                                for table in fresh.dataframe if "quality" in table.value))
+            self.assertEqual(latest, self.repository.load(case_id))
+            provider.assert_not_called()
+
+    def quality_form(self, app, module_label):
+        quality = next(item for item in app.radio if item.label == f"{module_label} quality")
+        label = app.text_input(key=f"{quality.key}_label")
+        rationale = app.text_area(key=f"{quality.key}_rationale")
+        save = app.button(key=f"FormSubmitter:{quality.key}_form-Save AI assessment quality")
+        return quality, label, rationale, save
+
+    def test_consecutive_quality_reviews_start_blank_and_keep_previous_attribution_in_history(self):
+        original = self.repository.create("Review attribution", Investigation(results={"ai": "Saved response"}))
+        case_id = original.metadata.case_id
+        app = self.start()
+        self.open_case(app, case_id)
+        self.go_to(app, MANAGEMENT)
+
+        def review(choice=None, reviewer="", reason=""):
+            quality, label, rationale, save = self.quality_form(app, "Initial AI analysis")
+            self.assertEqual((None, "", ""), (quality.value, label.value, rationale.value))
+            if choice is not None:
+                quality.set_value(choice)
+            if reviewer:
+                label.set_value(reviewer)
+            if reason:
+                rationale.set_value(reason)
+            save.click()
+            self.run_app(app)
+
+        review(AssessmentQuality.CORRECT, "First reviewer", "First rationale")
+        first, = self.repository.assessment_quality(case_id, 2)
+        self.assertTrue(any(item.value == "**Previous saved review**" for item in app.markdown))
+        self.assertTrue(any(item.value == "First rationale" for item in app.text))
+        review()
+        self.assertEqual(2, self.repository.load(case_id).metadata.version)
+        self.assertTrue(any("Choose an AI assessment quality" in item.value for item in app.error))
+        review(AssessmentQuality.INCORRECT, "Second reviewer", "Second rationale")
+        second, = self.repository.assessment_quality(case_id, 3)
+        self.assertEqual(("Second reviewer", "Second rationale"), (second["reviewer_label"], second["rationale"]))
+        review(AssessmentQuality.PARTIALLY_CORRECT)
+        third, = self.repository.assessment_quality(case_id, 4)
+        self.assertEqual(("", None), (third["reviewer_label"], third["rationale"]))
+        self.assertEqual(first["assessment_id"], second["assessment_id"])
+        self.assertEqual(first["assessment_id"], third["assessment_id"])
+        self.assertEqual([first], self.repository.assessment_quality(case_id, 2))
+        self.assertEqual([second], self.repository.assessment_quality(case_id, 3))
+        self.assertEqual(["create", *["ai_assessment_review"] * 3], [item.event for item in self.repository.history(case_id)])
+        self.assertEqual(original, self.repository.load(case_id, version=1))
+        self.assertEqual(IncidentVerdict.NOT_ASSESSED, self.repository.load(case_id).metadata.incident_verdict)
+
+    def test_review_inputs_are_isolated_by_case_and_response_and_stale_save_cannot_append(self):
+        state = Investigation(results={"ai": "First output"})
+        state.save_validation(VALIDATION)
+        first = self.repository.create("First case", state)
+        second = self.repository.create("Second case", Investigation(results={"ai": "Other output"}))
+        first_id, second_id = first.metadata.case_id, second.metadata.case_id
+        app = self.start()
+        self.open_case(app, first_id)
+        self.go_to(app, MANAGEMENT)
+        quality, label, rationale, save = self.quality_form(app, "Initial AI analysis")
+        quality.set_value(AssessmentQuality.CORRECT)
+        label.set_value("First case reviewer")
+        rationale.set_value("First case reasoning")
+        save.click()
+        self.run_app(app)
+        _, label, rationale, _ = self.quality_form(app, "Ticket validation")
+        self.assertEqual(("", ""), (label.value, rationale.value))
+
+        self.open_case(app, second_id)
+        self.go_to(app, MANAGEMENT)
+        _, label, rationale, _ = self.quality_form(app, "Initial AI analysis")
+        self.assertEqual(("", ""), (label.value, rationale.value))
+        self.open_case(app, first_id)
+        self.go_to(app, MANAGEMENT)
+        quality, label, rationale, save = self.quality_form(app, "Initial AI analysis")
+        self.assertEqual(("", ""), (label.value, rationale.value))
+        old_records = self.repository.assessment_quality(first_id, 2)
+        self.repository.save(first_id, 2, state, ai_module="ai")
+        quality.set_value(AssessmentQuality.INCORRECT)
+        label.set_value("Stale reviewer")
+        rationale.set_value("Stale reasoning")
+        save.click()
+        self.run_app(app)
+        self.assertTrue(any("The saved version changed" in item.value for item in app.error))
+        self.assertEqual(3, self.repository.load(first_id).metadata.version)
+        self.assertEqual(old_records, self.repository.assessment_quality(first_id, 2))
+        current_id = next(key for key, item in self.repository.reviewable_outputs(first_id, 3).items() if item[0] == "ai")
+        current = next(row for row in self.repository.assessment_quality(first_id, 3) if row["assessment_id"] == current_id)
+        self.assertEqual(AssessmentQuality.NOT_REVIEWED, current["quality"])
+        self.assertIsNone(current["review_version"])
+        _, label, rationale, _ = self.quality_form(app, "Initial AI analysis")
+        self.assertEqual(("", ""), (label.value, rationale.value))
+        self.assertEqual(second, self.repository.load(second_id))
 
     def test_add_note_and_download_exact_issued_report(self):
         case = self.repository.create("Audit records", Investigation(ticket=Ticket("Report source")))

@@ -41,6 +41,8 @@ Enable foreign key enforcement on every connection. Save case metadata, the new 
 
 Manual entry and Ticket Lab imports start in `DRAFT` with a new internal case ID. Retain Ticket Lab run and ticket IDs as provenance. Apply the same transition rules in the wizard and repository.
 
+`DRAFT` is the canonical stored initial status for v0.5. The term `OPEN` in the baseline audit request does not add a lifecycle state or alias. Phase 4E leaves stored statuses and schema version unchanged.
+
 | Current status | Allowed next status and action |
 | --- | --- |
 | `DRAFT` | `IN_PROGRESS` on ticket submission, or `ARCHIVED` on archive. |
@@ -77,6 +79,8 @@ Generate Markdown and JSON from the loaded case version through the existing exp
 ### Future analyst feedback and case memory
 
 Stable case, snapshot, assessment, and evidence IDs provide provenance for future case memory. Manual reviews capture quality and rationale against the exact output the analyst saw. Future reuse should use analyst-approved, redacted material and follow the applicable access and retention rules. v0.5 scope ends at manual feedback capture and historical inspection. Retrieval-augmented generation, model training, and feedback automation are deferred.
+
+Case Management records explicit verdict changes and optional output ratings as distinct events on new snapshots. Rating labels are self-entered and optional. Saved model runs are registered with the snapshot containing the output. A legacy output without an assessment row can be reviewed from the latest saved snapshot. Its first explicit rating registers it on the new review version without backfilling earlier history or inventing model metadata.
 
 ### Security and retention
 

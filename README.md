@@ -15,6 +15,7 @@ The project combines deterministic security rules with Google Gemini-assisted an
 - **Screenshot evidence review:** Image validation, evidence identification, and comparison against ticket-reported information.
 - **Evidence provenance:** Screenshot identifiers and SHA256 fingerprints to support traceability.
 - **Structured reporting:** Exportable Markdown and JSON investigation outputs.
+- **Local case management:** Versioned investigations, retained screenshot evidence, analyst decisions, notes, and issued reports.
 - **Synthetic incident testing:** Ticket Lab scenarios for investigating suspicious endpoint activity without requiring a production EDR environment.
 
 
@@ -65,6 +66,7 @@ sources, with recommendations for further investigation.
 - python-dotenv
 - tldextract
 - Python `unittest`
+- SQLite via Python's standard library. Dependency ranges are in `requirements.txt`. Release verification uses Streamlit 1.67.0.
 
 ## Getting Started
 
@@ -113,6 +115,18 @@ streamlit run dashboard_v1_2.py --server.address=127.0.0.1
 
 Open `http://127.0.0.1:8501` on the machine running the app. Launch from the repository root so Streamlit loads the bundled configuration. EDR Ticket Copilot is intended for local, single-analyst use.
 
+## Cases and analyst decisions
+
+Use **Case Management** to create, open, archive, or restore a case. The canonical initial status is `DRAFT`. Submitting the ticket advances it to `IN_PROGRESS`. From there, the analyst can put the case `ON_HOLD` or close it as `CLOSED_RESOLVED` or `CLOSED_INCONCLUSIVE`. Resume a held case and reopen a closed case to continue work. Archive keeps the case data and restore returns it to its previous status. `OPEN` is not a stored lifecycle value.
+
+For a dirty investigation, Save, Discard, or Cancel resolves a case switch. A failed or stale save keeps the draft in the current session. **Analyst decisions** in Case Management lets you record an optional incident verdict separately from an optional rating of a specific saved AI output. The lifecycle, verdict, and rating are independent. Archived cases retain their decisions and can be restored before adding new ones.
+
+Case History shows saved versions and evidence. **Issue report for saved version** stores the Markdown and JSON together. Later downloads return the issued bytes. The wizard's ordinary export does not issue a case-history record.
+
+### Local storage
+
+Set `EDR_CASE_DB_PATH` to an absolute path outside the checkout to override the default. The default is `%LOCALAPPDATA%\edr-ticket-copilot\cases.sqlite3` on Windows when that variable is set, or `$XDG_DATA_HOME/edr-ticket-copilot/cases.sqlite3` on other systems when set. The fallback is `~/.local/share/edr-ticket-copilot/cases.sqlite3`. The database contains ticket text, prepared screenshot bytes, model output, and analyst records. Restrict access to the database, SQLite sidecars, and backups using OS permissions and host encryption where appropriate.
+
 ## Investigation Workflow
 
 1. **Ticket Entry:** Enter incident details manually or select a synthetic Ticket Lab scenario.
@@ -123,13 +137,19 @@ Open `http://127.0.0.1:8501` on the machine running the app. Launch from the rep
 
 ## Automated Testing
 
-Run:
+Run the suite with the project's interpreter on Streamlit 1.67.0. For isolated verification, use a scratch working directory and a disposable database. Discovery includes a script that writes `EDR_Incident_Report_Test.md` to the working directory. The suite mocks Gemini submissions.
 
-```bash
-python -m unittest discover -v
+```powershell
+$project = (Get-Location).Path
+$python = Join-Path $project '.venv\Scripts\python.exe'
+$scratch = New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString()))
+$env:EDR_CASE_DB_PATH = Join-Path $scratch.FullName 'cases.sqlite3'
+Push-Location $scratch.FullName
+try { & $python -B -m unittest discover -v -s $project -t $project }
+finally { Pop-Location; Remove-Item Env:EDR_CASE_DB_PATH }
 ```
 
-The v0.4 development snapshot passed **11 automated tests**, covering incident regression scenarios, IOC handling, evidence processing, wizard integration, and report generation.
+On other platforms, use `.venv/bin/python` and the same discovery arguments with the repository's absolute path, a temporary working directory, and a disposable `EDR_CASE_DB_PATH`.
 
 ## Security and Limitations
 
@@ -140,14 +160,13 @@ This project is an investigation-support prototype, not a production EDR platfor
 - Uses synthetic incident data for demonstrations.
 - AI-generated findings require analyst verification.
 - Screenshot content is treated as potentially untrusted evidence.
-- API-based AI analysis requires appropriate data-handling authorization.
+- Each Google Gemini submission discloses its data categories and requires fresh consent, including retries. Opening cases or history does not submit data. Local triage and exports work without a Gemini key.
 - Findings should not be interpreted as definitive malware attribution or root-cause confirmation.
+- SQLite snapshots and SHA-256 checks support local history and detect mismatches with stored evidence provenance. They do not provide independently authenticated forensic integrity, a tamper-proof audit trail, or verified analyst identity. Reviewer labels are optional and self-entered. Keep backups with trusted access controls and test restore using a separate database. Use SQLite's backup API, or stop the application before copying its database and any sidecars together.
 
 ## Project Status
 
-**Version:** v0.4.0 — Initial public portfolio release
-
-The project is under active development, with planned improvements to investigation workflows, evidence handling, and analyst usability.
+**Version under verification:** v0.5
 
 
 ## Author

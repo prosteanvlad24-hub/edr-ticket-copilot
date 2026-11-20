@@ -10,7 +10,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from case_serialization import PAYLOAD_VERSION, decode_state, encode_state
 from evidence_inputs import ALLOWED_MIME, MAX_IMAGE_BYTES, MAX_IMAGES
@@ -38,6 +38,15 @@ class AssessmentQuality(StrEnum):
     PARTIALLY_CORRECT = "PARTIALLY_CORRECT"
     INCORRECT = "INCORRECT"
     NOT_REVIEWED = "NOT_REVIEWED"
+
+
+AI_MODULES = {"validation": "Ticket validation", "ai": "Initial AI analysis", "evidence": "Evidence reassessment"}
+
+
+def _ai_outputs(state):
+    outputs = {module: state["results"].get(module) for module in ("validation", "ai")}
+    outputs["evidence"] = state["reviewed_evidence"]
+    return {module: json.dumps(value, sort_keys=True, ensure_ascii=False) for module, value in outputs.items() if value}
 
 
 _TRANSITIONS = {
@@ -336,7 +345,9 @@ class CaseRepository:
         metadata = CaseVersion(case_id, 1, title, CaseStatus.DRAFT, IncidentVerdict.NOT_ASSESSED, now, now, "create", None)
         with self._transaction(write=True) as db:
             db.execute("INSERT INTO cases VALUES (?, ?, ?, ?, ?, ?)", (case_id, title, metadata.status, now, now, 1))
-            self._write_version(db, metadata, investigation if investigation is not None else Investigation())
+            state = investigation if investigation is not None else Investigation()
+            self._write_version(db, metadata, state)
+            self._register_outputs(db, metadata, state)
             return self._load(db, self._row(db, case_id))
 
     def load(self, case_id, *, version=None):
@@ -437,7 +448,8 @@ class CaseRepository:
         with self._transaction() as db:
             rows = db.execute(
                 """SELECT a.id AS assessment_id, a.version AS assessment_version, a.module,
-                          COALESCE(r.quality, ?) AS quality, r.version AS review_version
+                          COALESCE(r.quality, ?) AS quality, r.version AS review_version,
+                          r.reviewer_label, r.created_at AS reviewed_at, r.rationale
                    FROM ai_assessments a LEFT JOIN ai_assessment_reviews r ON r.id = (
                        SELECT review.id FROM ai_assessment_reviews review
                        WHERE review.case_id = a.case_id AND review.assessment_id = a.id AND review.version <= ?
@@ -449,11 +461,103 @@ class CaseRepository:
             return [dict(row) for row in rows]
 
     @staticmethod
+    def _insert_assessment(db, metadata, assessment_id, module, output):
+        db.execute(
+            """INSERT INTO ai_assessments
+               (id, case_id, version, module, created_at, model_identifier, output_json)
+               VALUES (?, ?, ?, ?, ?, NULL, ?)""",
+            (assessment_id, metadata.case_id, metadata.version, module, metadata.saved_at, output),
+        )
+
+    def _register_outputs(self, db, metadata, investigation, previous=None, ai_module=None):
+        prior = _ai_outputs(json.loads(previous["state_json"])) if previous is not None else {}
+        for module, output in _ai_outputs(encode_state(investigation)).items():
+            if module == ai_module or output != prior.get(module):
+                self._insert_assessment(db, metadata, str(uuid4()), module, output)
+
+    @staticmethod
+    def _reviewable_outputs(db, row):
+        case_id, version = row["case_id"], row["version"]
+        assessments = {
+            saved["module"]: saved for saved in db.execute(
+                """SELECT id, module, version, output_json FROM ai_assessments
+                   WHERE case_id = ? AND version <= ? ORDER BY version, created_at, id""",
+                (case_id, version),
+            )
+        }
+        outputs = {}
+        for module, output in _ai_outputs(json.loads(row["state_json"])).items():
+            assessment = assessments.get(module)
+            if assessment is not None and assessment["output_json"] == output:
+                ref, registered = assessment["id"], True
+            else:
+                ref, registered = str(uuid5(NAMESPACE_URL, f"edr-copilot/{case_id}/{version}/{module}")), False
+            outputs[ref] = (module, registered, output)
+        return outputs
+
+    def reviewable_outputs(self, case_id, version):
+        """Return exact saved outputs with their assessment reference and registration state."""
+        with self._transaction() as db:
+            return self._reviewable_outputs(db, self._row(db, case_id, version))
+
+    def set_incident_verdict(self, case_id, expected_version, verdict):
+        verdict = IncidentVerdict(verdict)
+        with self._transaction(write=True) as db:
+            previous = self._row(db, case_id)
+            self._check_version(previous, expected_version)
+            current = self._load(db, previous)
+            if current.metadata.status == CaseStatus.ARCHIVED:
+                raise InvalidTransitionError("Restore the archived case before recording a verdict")
+            if verdict == current.metadata.incident_verdict:
+                return current.metadata
+            return self._advance(
+                db, previous, current.investigation, current.metadata.status, verdict, "incident_verdict",
+            ).metadata
+
+    def review_assessment(self, case_id, expected_version, assessment_id, quality, *, reviewer_label="", rationale=""):
+        quality = AssessmentQuality(quality)
+        reviewer_label, rationale = reviewer_label.strip(), rationale.strip()
+        if len(reviewer_label) > 120 or len(rationale) > 4000:
+            raise ValueError("Review label or rationale exceeds the allowed length")
+        with self._transaction(write=True) as db:
+            previous = self._row(db, case_id)
+            self._check_version(previous, expected_version)
+            current = self._load(db, previous)
+            if current.metadata.status == CaseStatus.ARCHIVED:
+                raise InvalidTransitionError("Restore the archived case before recording a review")
+            candidate = self._reviewable_outputs(db, previous).get(assessment_id)
+            if candidate is None:
+                raise ValueError("The selected assessment is unavailable in this version")
+            module, registered, output = candidate
+            latest = db.execute(
+                """SELECT quality, reviewer_label, rationale FROM ai_assessment_reviews
+                   WHERE case_id = ? AND assessment_id = ? ORDER BY version DESC, created_at DESC, id DESC LIMIT 1""",
+                (case_id, assessment_id),
+            ).fetchone()
+            review = (quality, reviewer_label, rationale or None)
+            if (latest is None and quality == AssessmentQuality.NOT_REVIEWED) or (latest and tuple(latest) == review):
+                return current.metadata
+            saved = self._advance(
+                db, previous, current.investigation, current.metadata.status,
+                current.metadata.incident_verdict, "ai_assessment_review",
+            )
+            if not registered:
+                self._insert_assessment(db, saved.metadata, assessment_id, module, output)
+            db.execute(
+                """INSERT INTO ai_assessment_reviews
+                   (id, case_id, version, assessment_id, reviewer_label, created_at, quality, rationale)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (str(uuid4()), case_id, saved.metadata.version, assessment_id, reviewer_label,
+                 saved.metadata.saved_at, quality, rationale or None),
+            )
+            return saved.metadata
+
+    @staticmethod
     def _check_version(row, expected_version):
         if row["version"] != expected_version:
             raise CaseConflictError(f"Expected version {expected_version}, found {row['version']}")
 
-    def _advance(self, db, previous, state, status, verdict, event, rationale=None):
+    def _advance(self, db, previous, state, status, verdict, event, rationale=None, *, ai_module=None):
         case_id, version = previous["case_id"], previous["version"]
         now = _timestamp()
         updated = db.execute(
@@ -465,9 +569,10 @@ class CaseRepository:
         metadata = CaseVersion(case_id, version + 1, previous["title"], status, verdict,
                                previous["created_at"], now, event, rationale)
         self._write_version(db, metadata, state)
+        self._register_outputs(db, metadata, state, previous, ai_module)
         return self._load(db, self._row(db, case_id))
 
-    def save(self, case_id, expected_version, investigation, *, incident_verdict=None):
+    def save(self, case_id, expected_version, investigation, *, incident_verdict=None, ai_module=None):
         with self._transaction(write=True) as db:
             previous = self._row(db, case_id)
             self._check_version(previous, expected_version)
@@ -476,15 +581,17 @@ class CaseRepository:
             if status not in (CaseStatus.DRAFT, CaseStatus.IN_PROGRESS):
                 raise InvalidTransitionError("Resume, reopen, or restore the case before saving edits")
             verdict = current.metadata.incident_verdict if incident_verdict is None else IncidentVerdict(incident_verdict)
+            if ai_module is not None and ai_module not in _ai_outputs(encode_state(investigation)):
+                raise ValueError("No saved output for this AI module")
             # Compare JSON representations to account for tuple/list normalization on load.
             if (
-                verdict == current.metadata.incident_verdict
+                ai_module is None and verdict == current.metadata.incident_verdict
                 and investigation.evidence_by_source == current.investigation.evidence_by_source
                 and json.dumps(encode_state(investigation), sort_keys=True)
                 == json.dumps(encode_state(current.investigation), sort_keys=True)
             ):
                 return current
-            return self._advance(db, previous, investigation, status, verdict, "save")
+            return self._advance(db, previous, investigation, status, verdict, "save", ai_module=ai_module)
 
     def transition(self, case_id, expected_version, status, *, rationale=None, investigation=None):
         target = CaseStatus(status)
